@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Environment & credentials
+.env
+.env.*
+!.env.example
+token-cache.json
+selected-account.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Skills output (generated)
+skills/
