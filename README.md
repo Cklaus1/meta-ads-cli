@@ -2,7 +2,7 @@
 
 A standalone command-line tool for managing Facebook, Instagram, Threads & WhatsApp advertising via the Meta Graph API. Built for both humans and AI agents.
 
-**31 command groups | 180+ subcommands | Graph API v25.0 | Full Meta platform coverage**
+**37 command groups | 250+ subcommands | Graph API v25.0 | Full Meta platform coverage**
 
 ## Features
 
@@ -19,6 +19,12 @@ A standalone command-line tool for managing Facebook, Instagram, Threads & Whats
 - **Instagram publishing** — Publish photos, Reels, carousels, stories + media insights, comments
 - **Threads** — Post, reply, search, insights, conversation threads
 - **Lead generation** — Forms CRUD, lead export, quality analysis, webhooks
+- **Business Manager** — Ad accounts, pages, pixels, users, permissions, partner sharing
+- **WhatsApp messaging** — Send text/template/media/interactive messages, template CRUD, analytics
+- **Messenger** — Send messages, bot profiles, conversations, sponsored messages
+- **Reach & Frequency** — Reserved buying, media planning predictions
+- **Branded content** — Creator partnerships, influencer ad boosting
+- **Webhooks** — Real-time notifications for leads, campaigns, messages
 - **Multi-account profiles** — Named profiles for managing multiple clients/accounts
 - **Bidding & budget** — Strategy validation, automated adjustments, seasonal scheduling
 - **Creative management** — Clone with overrides, upload image/video, carousel support
@@ -137,7 +143,6 @@ meta-ads insights get 12345 -o csv > report.csv
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
 | `auth` | login, logout, status, setup, login-link, refresh-token | Authentication management |
-| `accounts` | list, get | Ad account management |
 | `campaigns` | list, get, create, update, delete | Campaign CRUD with Advantage+ fields |
 | `adsets` | list, get, create, update, delete | Ad set CRUD with placement targeting |
 | `ads` | list, get, create, update, delete | Ad CRUD with scheduling & review feedback |
@@ -157,7 +162,7 @@ meta-ads insights get 12345 -o csv > report.csv
 
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
-| `pages` | list, get, search, posts, create-post, update-post, delete-post, comments, reply, delete-comment, insights, post-insights | Facebook Page management |
+| `pages` | list, get, search, posts, create-post, update-post, delete-post, comments, reply, delete-comment, insights, post-insights, videos, upload-video, live-videos, create-live, events, create-event | Facebook Page management |
 | `threads` | profile, create, list, get, replies, conversation, delete, hide-reply, insights, post-insights, search | Threads publishing & insights |
 | `instagram` | publish, publish-carousel, publish-story, profile, media, media-get, media-insights, stories, story-insights, comments, reply-comment, delete-comment, insights, shopping-insights, sync-catalog, create-shopping-ad | Instagram publishing & management |
 
@@ -166,7 +171,7 @@ meta-ads insights get 12345 -o csv > report.csv
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
 | `leads` | forms, get, create-form, update-form, delete-form, export, quality, webhooks | Lead generation |
-| `catalog` | list, get, products, get-product, create-product, update-product, delete-product, feeds, create-feed, product-sets, create-product-set, upload-feed, dynamic-template, collection-ad, product-performance | Product catalog |
+| `catalog` | list, get, products, get-product, create-product, update-product, delete-product, feeds, create-feed, product-sets, create-product-set, batch, batch-status, upload-feed, dynamic-template, collection-ad, product-performance | Product catalog & batch API |
 
 ### Bidding & Budget
 
@@ -194,8 +199,30 @@ meta-ads insights get 12345 -o csv > report.csv
 
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
-| `conversions` | send-event, send-batch, custom-conversions, create-custom, setup-tracking, validate-setup, offline-events, offline-event-sets, create-offline-set | Server-side & offline tracking |
+| `conversions` | send-event, send-batch, send-app-event, custom-conversions, create-custom, setup-tracking, validate-setup, offline-events, offline-event-sets, create-offline-set, datasets, dataset-send | Server-side, offline & app tracking |
+| `accounts` | list, get, activity | Ad accounts & audit trail |
 | `monitor` | check, auto-pause, dashboard | Performance monitoring |
+
+### Business & Messaging
+
+| Command | Subcommands | Description |
+|---------|-------------|-------------|
+| `business` | get, ad-accounts, pages, pixels, users, system-users, create-system-user, assign-ad-account, assign-page, share-ad-account, credit-lines | Business Manager |
+| `whatsapp` | profile, phone-numbers, send-text, send-template, send-media, send-interactive, templates, create-template, delete-template, analytics, conversation-analytics | WhatsApp Business |
+| `messenger` | send, send-template, get-profile, set-profile, conversations, messages | Messenger Platform |
+
+### Media Planning & Creators
+
+| Command | Subcommands | Description |
+|---------|-------------|-------------|
+| `reach-frequency` | predict, get, list, reserve, cancel | Reserved buying & media planning |
+| `branded-content` | eligible-sponsors, approve-creator, revoke-creator, boost-post, search-creators | Influencer partnerships |
+
+### Webhooks
+
+| Command | Subcommands | Description |
+|---------|-------------|-------------|
+| `webhooks` | list, subscribe, unsubscribe, page-subscribe, page-unsubscribe | Real-time event notifications |
 
 ### Workflows & Utilities
 
