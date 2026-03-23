@@ -27,7 +27,7 @@ export function registerAdCommands(program: Command, getClient: () => MetaClient
       }
       const client = getClient();
       const params: Record<string, string> = {
-        fields: 'id,name,adset_id,campaign_id,status,creative,bid_amount,created_time,updated_time',
+        fields: 'id,name,adset_id,campaign_id,status,effective_status,configured_status,creative,bid_amount,created_time,updated_time,issues_info,preview_shareable_link',
         limit: opts.limit,
       };
       if (opts.status) {
@@ -58,7 +58,7 @@ export function registerAdCommands(program: Command, getClient: () => MetaClient
     .action(handleErrors(async (adId: string, opts) => {
       const client = getClient();
       const params: Record<string, string> = {
-        fields: 'id,name,adset_id,campaign_id,status,creative,bid_amount,tracking_specs,created_time,updated_time,effective_status',
+        fields: 'id,name,adset_id,campaign_id,status,effective_status,configured_status,creative,bid_amount,tracking_specs,conversion_domain,ad_review_feedback,issues_info,preview_shareable_link,ad_active_time,ad_schedule_start_time,ad_schedule_end_time,adlabels,source_ad_id,created_time,updated_time',
       };
 
       const response = await client.request(adId, { params });
@@ -75,6 +75,11 @@ export function registerAdCommands(program: Command, getClient: () => MetaClient
     .option('--status <status>', 'Initial status', 'PAUSED')
     .option('--bid-amount <cents>', 'Bid amount in cents')
     .option('--tracking-specs <json>', 'Tracking specs as JSON string')
+    .option('--conversion-domain <domain>', 'Conversion domain for pixel events')
+    .option('--ad-schedule-start-time <time>', 'Ad start time (ISO 8601, sales/app campaigns)')
+    .option('--ad-schedule-end-time <time>', 'Ad end time (ISO 8601, sales/app campaigns)')
+    .option('--adlabels <json>', 'Ad labels as JSON array')
+    .option('--engagement-audience', 'Create engagement-based custom audience')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) {
@@ -90,6 +95,11 @@ export function registerAdCommands(program: Command, getClient: () => MetaClient
 
       if (opts.bidAmount) body.bid_amount = opts.bidAmount;
       if (opts.trackingSpecs) body.tracking_specs = opts.trackingSpecs;
+      if (opts.conversionDomain) body.conversion_domain = opts.conversionDomain;
+      if (opts.adScheduleStartTime) body.ad_schedule_start_time = opts.adScheduleStartTime;
+      if (opts.adScheduleEndTime) body.ad_schedule_end_time = opts.adScheduleEndTime;
+      if (opts.adlabels) body.adlabels = opts.adlabels;
+      if (opts.engagementAudience) body.engagement_audience = 'true';
 
       const response = await client.request(`${opts.accountId}/ads`, {
         method: 'POST',
@@ -106,6 +116,11 @@ export function registerAdCommands(program: Command, getClient: () => MetaClient
     .option('--status <status>', 'New status (ACTIVE, PAUSED)')
     .option('--bid-amount <cents>', 'New bid amount')
     .option('--creative-id <id>', 'New creative ID')
+    .option('--tracking-specs <json>', 'New tracking specs as JSON')
+    .option('--conversion-domain <domain>', 'Conversion domain for pixel events')
+    .option('--ad-schedule-start-time <time>', 'Ad start time (ISO 8601)')
+    .option('--ad-schedule-end-time <time>', 'Ad end time (ISO 8601)')
+    .option('--adlabels <json>', 'Ad labels as JSON array')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (adId: string, opts) => {
       const client = getClient();
@@ -115,6 +130,11 @@ export function registerAdCommands(program: Command, getClient: () => MetaClient
       if (opts.status) body.status = opts.status;
       if (opts.bidAmount) body.bid_amount = opts.bidAmount;
       if (opts.creativeId) body.creative = JSON.stringify({ creative_id: opts.creativeId });
+      if (opts.trackingSpecs) body.tracking_specs = opts.trackingSpecs;
+      if (opts.conversionDomain) body.conversion_domain = opts.conversionDomain;
+      if (opts.adScheduleStartTime) body.ad_schedule_start_time = opts.adScheduleStartTime;
+      if (opts.adScheduleEndTime) body.ad_schedule_end_time = opts.adScheduleEndTime;
+      if (opts.adlabels) body.adlabels = opts.adlabels;
 
       if (Object.keys(body).length === 0) {
         throw new Error('No update parameters provided');

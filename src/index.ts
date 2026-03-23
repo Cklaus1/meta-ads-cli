@@ -39,14 +39,14 @@ program
   .version('0.2.0')
   .option('--dry-run', 'Preview the API request without executing it')
   .option('--read-only', 'Restrict to read-only operations (block POST/DELETE)')
-  .option('--api-version <version>', 'Graph API version (default: v24.0)', 'v24.0');
+  .option('--api-version <version>', 'Graph API version (default: v25.0)', 'v25.0');
 
 // Determine flags from env or argv
 const dryRun = process.argv.includes('--dry-run');
 const readOnly = process.argv.includes('--read-only');
 
 // Extract --api-version value
-let apiVersion = 'v24.0';
+let apiVersion = 'v25.0';
 const apiIdx = process.argv.indexOf('--api-version');
 if (apiIdx !== -1 && process.argv[apiIdx + 1]) {
   apiVersion = process.argv[apiIdx + 1];

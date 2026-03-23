@@ -27,7 +27,7 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
       }
       const client = getClient();
       const params: Record<string, string> = {
-        fields: 'id,name,objective,status,daily_budget,lifetime_budget,buying_type,start_time,stop_time,created_time,updated_time,bid_strategy',
+        fields: 'id,name,objective,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,spend_cap,buying_type,bid_strategy,start_time,stop_time,created_time,updated_time,special_ad_categories,pacing_type,issues_info,smart_promotion_type',
         limit: opts.limit,
       };
       if (opts.status) {
@@ -54,7 +54,7 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
     .action(handleErrors(async (campaignId: string, opts) => {
       const client = getClient();
       const params: Record<string, string> = {
-        fields: 'id,name,objective,status,daily_budget,lifetime_budget,buying_type,start_time,stop_time,created_time,updated_time,bid_strategy,special_ad_categories,budget_remaining,configured_status',
+        fields: 'id,name,objective,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,spend_cap,buying_type,bid_strategy,start_time,stop_time,created_time,updated_time,special_ad_categories,special_ad_category_country,pacing_type,promoted_object,issues_info,adlabels,is_budget_schedule_enabled,source_campaign_id,smart_promotion_type',
       };
 
       const response = await client.request(campaignId, { params });
@@ -75,8 +75,14 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
     .option('--spend-cap <cents>', 'Campaign spend cap in cents')
     .option('--buying-type <type>', 'Buying type (e.g., AUCTION)')
     .option('--special-ad-categories <categories>', 'Comma-separated special ad categories')
+    .option('--special-ad-category-country <countries>', 'Comma-separated country codes for special ad categories')
+    .option('--promoted-object <json>', 'Promoted object as JSON (e.g., {"pixel_id":"123","custom_event_type":"PURCHASE"})')
+    .option('--pacing-type <type>', 'Pacing type (standard, no_pacing)')
     .option('--cbo', 'Enable campaign budget optimization')
     .option('--adset-level-budgets', 'Use ad set level budgets instead of campaign level')
+    .option('--start-time <time>', 'Campaign start time (ISO 8601)')
+    .option('--stop-time <time>', 'Campaign stop time (ISO 8601)')
+    .option('--adlabels <json>', 'Ad labels as JSON array')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) {
@@ -101,6 +107,12 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
       if (opts.bidCap) body.bid_cap = opts.bidCap;
       if (opts.spendCap) body.spend_cap = opts.spendCap;
       if (opts.buyingType) body.buying_type = opts.buyingType;
+      if (opts.specialAdCategoryCountry) body.special_ad_category_country = JSON.stringify(opts.specialAdCategoryCountry.split(','));
+      if (opts.promotedObject) body.promoted_object = opts.promotedObject;
+      if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
+      if (opts.startTime) body.start_time = opts.startTime;
+      if (opts.stopTime) body.stop_time = opts.stopTime;
+      if (opts.adlabels) body.adlabels = opts.adlabels;
 
       const response = await client.request(`${opts.accountId}/campaigns`, {
         method: 'POST',
@@ -120,6 +132,10 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
     .option('--bid-strategy <strategy>', 'New bid strategy')
     .option('--bid-cap <cents>', 'New bid cap in cents')
     .option('--spend-cap <cents>', 'New spend cap in cents')
+    .option('--pacing-type <type>', 'Pacing type (standard, no_pacing)')
+    .option('--start-time <time>', 'Campaign start time (ISO 8601)')
+    .option('--stop-time <time>', 'Campaign stop time (ISO 8601)')
+    .option('--adlabels <json>', 'Ad labels as JSON array')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (campaignId: string, opts) => {
       const client = getClient();
@@ -132,6 +148,10 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
       if (opts.bidStrategy) body.bid_strategy = opts.bidStrategy;
       if (opts.bidCap) body.bid_cap = opts.bidCap;
       if (opts.spendCap) body.spend_cap = opts.spendCap;
+      if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
+      if (opts.startTime) body.start_time = opts.startTime;
+      if (opts.stopTime) body.stop_time = opts.stopTime;
+      if (opts.adlabels) body.adlabels = opts.adlabels;
 
       if (Object.keys(body).length === 0) {
         throw new Error('No update parameters provided');

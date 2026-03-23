@@ -69,7 +69,7 @@ export function registerXxxCommands(program: Command, getClient: () => MetaClien
 
 ## Meta API Patterns
 
-- **Base URL:** `https://graph.facebook.com/v24.0`
+- **Base URL:** `https://graph.facebook.com/v25.0`
 - **Auth:** `access_token` as query param (injected by MetaClient)
 - **GET:** Query params for `fields`, `limit`, `after`, filters
 - **POST:** `application/x-www-form-urlencoded` (not JSON body)

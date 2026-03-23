@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { resolveTimeRange } from '../time-range.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -82,9 +83,13 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
       const client = getClient();
       const insightFields = opts.metrics;
 
+      const insightParams: Record<string, string> = { fields: insightFields };
+      const resolved = resolveTimeRange(opts.timeRange);
+      if (resolved) insightParams.time_range = resolved;
+
       const [insightsA, insightsB] = await Promise.all([
-        client.request(`${campaignIdA}/insights`, { params: { fields: insightFields } }),
-        client.request(`${campaignIdB}/insights`, { params: { fields: insightFields } }),
+        client.request(`${campaignIdA}/insights`, { params: insightParams }),
+        client.request(`${campaignIdB}/insights`, { params: insightParams }),
       ]);
 
       const [campaignA, campaignB] = await Promise.all([

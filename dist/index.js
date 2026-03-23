@@ -85,219 +85,6 @@ var Logger = class {
 var logger = new Logger();
 var logger_default = logger;
 
-// src/auth.ts
-var SERVICE_NAME = "meta-ads-cli";
-var TOKEN_CACHE_ACCOUNT = "meta-token-cache";
-var CONFIG_DIR = path2.join(os.homedir(), ".config", "meta-ads-cli");
-var FALLBACK_TOKEN_PATH = path2.join(CONFIG_DIR, "token-cache.json");
-var AUTH_SCOPE = "business_management,public_profile,pages_show_list,pages_read_engagement,ads_management,ads_read,read_insights,leads_retrieval";
-var AUTH_REDIRECT_URI = "http://localhost:8899/callback";
-function ensureConfigDir() {
-  if (!fs2.existsSync(CONFIG_DIR)) {
-    fs2.mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-}
-var AuthManager = class {
-  constructor() {
-    this.tokenData = null;
-    this.appId = process.env.META_ADS_CLI_APP_ID || process.env.META_APP_ID || "";
-    this.appSecret = process.env.META_ADS_CLI_APP_SECRET || process.env.META_APP_SECRET || "";
-  }
-  async initialize() {
-    await this.loadTokenCache();
-  }
-  async loadTokenCache() {
-    try {
-      let cacheData;
-      try {
-        const data = await keytar.getPassword(SERVICE_NAME, TOKEN_CACHE_ACCOUNT);
-        if (data) cacheData = data;
-      } catch {
-      }
-      if (!cacheData && fs2.existsSync(FALLBACK_TOKEN_PATH)) {
-        cacheData = fs2.readFileSync(FALLBACK_TOKEN_PATH, "utf8");
-      }
-      if (cacheData) {
-        const parsed = JSON.parse(cacheData);
-        if (parsed.expiresIn) {
-          const expiryTime = parsed.createdAt + parsed.expiresIn;
-          if (Date.now() / 1e3 > expiryTime) {
-            logger_default.info("Cached token is expired, discarding");
-            this.tokenData = null;
-            return;
-          }
-        }
-        this.tokenData = parsed;
-        logger_default.info("Loaded cached token");
-      }
-    } catch {
-    }
-  }
-  async saveTokenCache() {
-    if (!this.tokenData) return;
-    ensureConfigDir();
-    const cacheData = JSON.stringify(this.tokenData);
-    try {
-      await keytar.setPassword(SERVICE_NAME, TOKEN_CACHE_ACCOUNT, cacheData);
-    } catch {
-      fs2.writeFileSync(FALLBACK_TOKEN_PATH, cacheData);
-    }
-  }
-  async getToken() {
-    const envToken = process.env.META_ADS_CLI_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
-    if (envToken) return envToken;
-    if (this.tokenData?.accessToken) {
-      if (this.tokenData.expiresIn) {
-        const expiryTime = this.tokenData.createdAt + this.tokenData.expiresIn;
-        if (Date.now() / 1e3 > expiryTime) {
-          throw new Error("Token expired. Run: meta-ads auth login");
-        }
-      }
-      return this.tokenData.accessToken;
-    }
-    throw new Error("Not logged in. Run: meta-ads auth login");
-  }
-  async login() {
-    if (!this.appId) {
-      throw new Error(
-        "No App ID configured. Set META_ADS_CLI_APP_ID in your .env file or run: meta-ads auth setup"
-      );
-    }
-    return new Promise((resolve, reject) => {
-      const server = http.createServer(async (req, res) => {
-        const url = new URL(req.url || "/", `http://localhost:8899`);
-        if (url.pathname === "/callback") {
-          res.writeHead(200, { "Content-Type": "text/html" });
-          res.end(`
-            <!DOCTYPE html>
-            <html>
-            <head><title>Meta Ads CLI - Authentication</title></head>
-            <body>
-              <h2>Processing authentication...</h2>
-              <p id="status">Extracting token...</p>
-              <script>
-                const hash = window.location.hash.substring(1);
-                const params = new URLSearchParams(hash);
-                const token = params.get('access_token');
-                const expiresIn = params.get('expires_in');
-                if (token) {
-                  fetch('/token', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ access_token: token, expires_in: expiresIn })
-                  }).then(() => {
-                    document.getElementById('status').textContent = 'Authentication successful! You can close this window.';
-                  });
-                } else {
-                  document.getElementById('status').textContent = 'Authentication failed. No token received.';
-                }
-              </script>
-            </body>
-            </html>
-          `);
-          return;
-        }
-        if (url.pathname === "/token" && req.method === "POST") {
-          let body = "";
-          req.on("data", (chunk) => {
-            body += chunk;
-          });
-          req.on("end", async () => {
-            try {
-              const data = JSON.parse(body);
-              const shortLivedToken = data.access_token;
-              const expiresIn = data.expires_in ? parseInt(data.expires_in) : void 0;
-              let finalToken = shortLivedToken;
-              let finalExpiresIn = expiresIn;
-              if (this.appSecret) {
-                try {
-                  const exchanged = await this.exchangeForLongLivedToken(shortLivedToken);
-                  if (exchanged) {
-                    finalToken = exchanged.accessToken;
-                    finalExpiresIn = exchanged.expiresIn;
-                    logger_default.info(`Exchanged for long-lived token (expires in ${finalExpiresIn}s)`);
-                  }
-                } catch (err) {
-                  logger_default.warn(`Could not exchange for long-lived token: ${err}`);
-                }
-              }
-              this.tokenData = {
-                accessToken: finalToken,
-                expiresIn: finalExpiresIn,
-                createdAt: Math.floor(Date.now() / 1e3)
-              };
-              await this.saveTokenCache();
-              res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify({ success: true }));
-              server.close();
-              resolve(finalToken);
-            } catch (err) {
-              res.writeHead(400);
-              res.end("Invalid request");
-              server.close();
-              reject(err);
-            }
-          });
-          return;
-        }
-        res.writeHead(404);
-        res.end("Not found");
-      });
-      server.listen(8899, () => {
-        const authUrl = `https://www.facebook.com/v24.0/dialog/oauth?client_id=${this.appId}&redirect_uri=${encodeURIComponent(AUTH_REDIRECT_URI)}&scope=${AUTH_SCOPE}&response_type=token`;
-        console.log("\nOpen this URL in your browser to authenticate:\n");
-        console.log(`  ${authUrl}
-`);
-        console.log("Waiting for authentication...\n");
-      });
-      setTimeout(() => {
-        server.close();
-        reject(new Error("Authentication timed out after 5 minutes"));
-      }, 3e5);
-    });
-  }
-  async exchangeForLongLivedToken(shortLivedToken) {
-    const url = `https://graph.facebook.com/v24.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${this.appId}&client_secret=${this.appSecret}&fb_exchange_token=${shortLivedToken}`;
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    const data = await response.json();
-    if (!data.access_token) return null;
-    return {
-      accessToken: data.access_token,
-      expiresIn: data.expires_in,
-      createdAt: Math.floor(Date.now() / 1e3)
-    };
-  }
-  async logout() {
-    this.tokenData = null;
-    try {
-      await keytar.deletePassword(SERVICE_NAME, TOKEN_CACHE_ACCOUNT);
-    } catch {
-    }
-    if (fs2.existsSync(FALLBACK_TOKEN_PATH)) {
-      fs2.unlinkSync(FALLBACK_TOKEN_PATH);
-    }
-  }
-  async verifyLogin() {
-    try {
-      const token = await this.getToken();
-      const response = await fetch(
-        `https://graph.facebook.com/v24.0/me?access_token=${token}`
-      );
-      if (response.ok) {
-        const data = await response.json();
-        return { success: true, user: data };
-      }
-      return { success: false };
-    } catch {
-      return { success: false };
-    }
-  }
-  getAppId() {
-    return this.appId;
-  }
-};
-
 // src/mime.ts
 var MIME_TYPES = {
   // Images
@@ -351,7 +138,7 @@ function detectMimeType(filename) {
 // src/meta-client.ts
 var MAX_RETRIES = 3;
 var MAX_PAGES = 100;
-var API_VERSION = "v24.0";
+var API_VERSION = "v25.0";
 var MetaClient = class {
   constructor(auth, dryRun2 = false, apiVersion2, readOnly2 = false) {
     this.auth = auth;
@@ -550,6 +337,219 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// src/auth.ts
+var SERVICE_NAME = "meta-ads-cli";
+var TOKEN_CACHE_ACCOUNT = "meta-token-cache";
+var CONFIG_DIR = path2.join(os.homedir(), ".config", "meta-ads-cli");
+var FALLBACK_TOKEN_PATH = path2.join(CONFIG_DIR, "token-cache.json");
+var AUTH_SCOPE = "business_management,public_profile,pages_show_list,pages_read_engagement,ads_management,ads_read,read_insights,leads_retrieval";
+var AUTH_REDIRECT_URI = "http://localhost:8899/callback";
+function ensureConfigDir() {
+  if (!fs2.existsSync(CONFIG_DIR)) {
+    fs2.mkdirSync(CONFIG_DIR, { recursive: true });
+  }
+}
+var AuthManager = class {
+  constructor() {
+    this.tokenData = null;
+    this.appId = process.env.META_ADS_CLI_APP_ID || process.env.META_APP_ID || "";
+    this.appSecret = process.env.META_ADS_CLI_APP_SECRET || process.env.META_APP_SECRET || "";
+  }
+  async initialize() {
+    await this.loadTokenCache();
+  }
+  async loadTokenCache() {
+    try {
+      let cacheData;
+      try {
+        const data = await keytar.getPassword(SERVICE_NAME, TOKEN_CACHE_ACCOUNT);
+        if (data) cacheData = data;
+      } catch {
+      }
+      if (!cacheData && fs2.existsSync(FALLBACK_TOKEN_PATH)) {
+        cacheData = fs2.readFileSync(FALLBACK_TOKEN_PATH, "utf8");
+      }
+      if (cacheData) {
+        const parsed = JSON.parse(cacheData);
+        if (parsed.expiresIn) {
+          const expiryTime = parsed.createdAt + parsed.expiresIn;
+          if (Date.now() / 1e3 > expiryTime) {
+            logger_default.info("Cached token is expired, discarding");
+            this.tokenData = null;
+            return;
+          }
+        }
+        this.tokenData = parsed;
+        logger_default.info("Loaded cached token");
+      }
+    } catch {
+    }
+  }
+  async saveTokenCache() {
+    if (!this.tokenData) return;
+    ensureConfigDir();
+    const cacheData = JSON.stringify(this.tokenData);
+    try {
+      await keytar.setPassword(SERVICE_NAME, TOKEN_CACHE_ACCOUNT, cacheData);
+    } catch {
+      fs2.writeFileSync(FALLBACK_TOKEN_PATH, cacheData);
+    }
+  }
+  async getToken() {
+    const envToken = process.env.META_ADS_CLI_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+    if (envToken) return envToken;
+    if (this.tokenData?.accessToken) {
+      if (this.tokenData.expiresIn) {
+        const expiryTime = this.tokenData.createdAt + this.tokenData.expiresIn;
+        if (Date.now() / 1e3 > expiryTime) {
+          throw new Error("Token expired. Run: meta-ads auth login");
+        }
+      }
+      return this.tokenData.accessToken;
+    }
+    throw new Error("Not logged in. Run: meta-ads auth login");
+  }
+  async login() {
+    if (!this.appId) {
+      throw new Error(
+        "No App ID configured. Set META_ADS_CLI_APP_ID in your .env file or run: meta-ads auth setup"
+      );
+    }
+    return new Promise((resolve, reject) => {
+      const server = http.createServer(async (req, res) => {
+        const url = new URL(req.url || "/", `http://localhost:8899`);
+        if (url.pathname === "/callback") {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end(`
+            <!DOCTYPE html>
+            <html>
+            <head><title>Meta Ads CLI - Authentication</title></head>
+            <body>
+              <h2>Processing authentication...</h2>
+              <p id="status">Extracting token...</p>
+              <script>
+                const hash = window.location.hash.substring(1);
+                const params = new URLSearchParams(hash);
+                const token = params.get('access_token');
+                const expiresIn = params.get('expires_in');
+                if (token) {
+                  fetch('/token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ access_token: token, expires_in: expiresIn })
+                  }).then(() => {
+                    document.getElementById('status').textContent = 'Authentication successful! You can close this window.';
+                  });
+                } else {
+                  document.getElementById('status').textContent = 'Authentication failed. No token received.';
+                }
+              </script>
+            </body>
+            </html>
+          `);
+          return;
+        }
+        if (url.pathname === "/token" && req.method === "POST") {
+          let body = "";
+          req.on("data", (chunk) => {
+            body += chunk;
+          });
+          req.on("end", async () => {
+            try {
+              const data = JSON.parse(body);
+              const shortLivedToken = data.access_token;
+              const expiresIn = data.expires_in ? parseInt(data.expires_in) : void 0;
+              let finalToken = shortLivedToken;
+              let finalExpiresIn = expiresIn;
+              if (this.appSecret) {
+                try {
+                  const exchanged = await this.exchangeForLongLivedToken(shortLivedToken);
+                  if (exchanged) {
+                    finalToken = exchanged.accessToken;
+                    finalExpiresIn = exchanged.expiresIn;
+                    logger_default.info(`Exchanged for long-lived token (expires in ${finalExpiresIn}s)`);
+                  }
+                } catch (err) {
+                  logger_default.warn(`Could not exchange for long-lived token: ${err}`);
+                }
+              }
+              this.tokenData = {
+                accessToken: finalToken,
+                expiresIn: finalExpiresIn,
+                createdAt: Math.floor(Date.now() / 1e3)
+              };
+              await this.saveTokenCache();
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ success: true }));
+              server.close();
+              resolve(finalToken);
+            } catch (err) {
+              res.writeHead(400);
+              res.end("Invalid request");
+              server.close();
+              reject(err);
+            }
+          });
+          return;
+        }
+        res.writeHead(404);
+        res.end("Not found");
+      });
+      server.listen(8899, () => {
+        const authUrl = `https://www.facebook.com/${API_VERSION}/dialog/oauth?client_id=${this.appId}&redirect_uri=${encodeURIComponent(AUTH_REDIRECT_URI)}&scope=${AUTH_SCOPE}&response_type=token`;
+        console.log("\nOpen this URL in your browser to authenticate:\n");
+        console.log(`  ${authUrl}
+`);
+        console.log("Waiting for authentication...\n");
+      });
+      setTimeout(() => {
+        server.close();
+        reject(new Error("Authentication timed out after 5 minutes"));
+      }, 3e5);
+    });
+  }
+  async exchangeForLongLivedToken(shortLivedToken) {
+    const url = `https://graph.facebook.com/${API_VERSION}/oauth/access_token?grant_type=fb_exchange_token&client_id=${this.appId}&client_secret=${this.appSecret}&fb_exchange_token=${shortLivedToken}`;
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!data.access_token) return null;
+    return {
+      accessToken: data.access_token,
+      expiresIn: data.expires_in,
+      createdAt: Math.floor(Date.now() / 1e3)
+    };
+  }
+  async logout() {
+    this.tokenData = null;
+    try {
+      await keytar.deletePassword(SERVICE_NAME, TOKEN_CACHE_ACCOUNT);
+    } catch {
+    }
+    if (fs2.existsSync(FALLBACK_TOKEN_PATH)) {
+      fs2.unlinkSync(FALLBACK_TOKEN_PATH);
+    }
+  }
+  async verifyLogin() {
+    try {
+      const token = await this.getToken();
+      const response = await fetch(
+        `https://graph.facebook.com/${API_VERSION}/me?access_token=${token}`
+      );
+      if (response.ok) {
+        const data = await response.json();
+        return { success: true, user: data };
+      }
+      return { success: false };
+    } catch {
+      return { success: false };
+    }
+  }
+  getAppId() {
+    return this.appId;
+  }
+};
+
 // src/commands/auth.ts
 function registerAuthCommands(program2, getAuth2) {
   const auth = program2.command("auth").description("Authentication management");
@@ -608,7 +608,7 @@ function registerAuthCommands(program2, getAuth2) {
       process.exit(1);
     }
     const scope = "business_management,public_profile,pages_show_list,pages_read_engagement,ads_management,ads_read,read_insights,leads_retrieval";
-    const url = `https://www.facebook.com/v24.0/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent("http://localhost:8899/callback")}&scope=${scope}&response_type=token`;
+    const url = `https://www.facebook.com/${API_VERSION}/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent("http://localhost:8899/callback")}&scope=${scope}&response_type=token`;
     console.log("\nOpen this URL in your browser to authenticate:\n");
     console.log(`  ${url}
 `);
@@ -624,7 +624,7 @@ function registerAuthCommands(program2, getAuth2) {
         console.error("App Secret required for token refresh. Set META_ADS_CLI_APP_SECRET");
         process.exit(1);
       }
-      const url = `https://graph.facebook.com/v24.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${token}`;
+      const url = `https://graph.facebook.com/${API_VERSION}/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${token}`;
       const response = await fetch(url);
       if (!response.ok) {
         const err = await response.text();
@@ -908,7 +908,7 @@ function registerCampaignCommands(program2, getClient2) {
     }
     const client = getClient2();
     const params = {
-      fields: "id,name,objective,status,daily_budget,lifetime_budget,buying_type,start_time,stop_time,created_time,updated_time,bid_strategy",
+      fields: "id,name,objective,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,spend_cap,buying_type,bid_strategy,start_time,stop_time,created_time,updated_time,special_ad_categories,pacing_type,issues_info,smart_promotion_type",
       limit: opts.limit
     };
     if (opts.status) {
@@ -929,12 +929,12 @@ function registerCampaignCommands(program2, getClient2) {
   campaigns.command("get <campaignId>").description("Get detailed info for a specific campaign").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (campaignId, opts) => {
     const client = getClient2();
     const params = {
-      fields: "id,name,objective,status,daily_budget,lifetime_budget,buying_type,start_time,stop_time,created_time,updated_time,bid_strategy,special_ad_categories,budget_remaining,configured_status"
+      fields: "id,name,objective,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,spend_cap,buying_type,bid_strategy,start_time,stop_time,created_time,updated_time,special_ad_categories,special_ad_category_country,pacing_type,promoted_object,issues_info,adlabels,is_budget_schedule_enabled,source_campaign_id,smart_promotion_type"
     };
     const response = await client.request(campaignId, { params });
     console.log(formatOutput(response.data, opts.output));
   }));
-  campaigns.command("create").description("Create a new campaign").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId()).requiredOption("--name <name>", "Campaign name").requiredOption("--objective <objective>", "Campaign objective (OUTCOME_AWARENESS, OUTCOME_TRAFFIC, OUTCOME_ENGAGEMENT, OUTCOME_LEADS, OUTCOME_SALES, OUTCOME_APP_PROMOTION)").option("--status <status>", "Initial status", "PAUSED").option("--daily-budget <cents>", "Daily budget in cents").option("--lifetime-budget <cents>", "Lifetime budget in cents").option("--bid-strategy <strategy>", "Bid strategy (LOWEST_COST_WITHOUT_CAP, LOWEST_COST_WITH_BID_CAP, COST_CAP)").option("--bid-cap <cents>", "Bid cap in cents").option("--spend-cap <cents>", "Campaign spend cap in cents").option("--buying-type <type>", "Buying type (e.g., AUCTION)").option("--special-ad-categories <categories>", "Comma-separated special ad categories").option("--cbo", "Enable campaign budget optimization").option("--adset-level-budgets", "Use ad set level budgets instead of campaign level").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
+  campaigns.command("create").description("Create a new campaign").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId()).requiredOption("--name <name>", "Campaign name").requiredOption("--objective <objective>", "Campaign objective (OUTCOME_AWARENESS, OUTCOME_TRAFFIC, OUTCOME_ENGAGEMENT, OUTCOME_LEADS, OUTCOME_SALES, OUTCOME_APP_PROMOTION)").option("--status <status>", "Initial status", "PAUSED").option("--daily-budget <cents>", "Daily budget in cents").option("--lifetime-budget <cents>", "Lifetime budget in cents").option("--bid-strategy <strategy>", "Bid strategy (LOWEST_COST_WITHOUT_CAP, LOWEST_COST_WITH_BID_CAP, COST_CAP)").option("--bid-cap <cents>", "Bid cap in cents").option("--spend-cap <cents>", "Campaign spend cap in cents").option("--buying-type <type>", "Buying type (e.g., AUCTION)").option("--special-ad-categories <categories>", "Comma-separated special ad categories").option("--special-ad-category-country <countries>", "Comma-separated country codes for special ad categories").option("--promoted-object <json>", 'Promoted object as JSON (e.g., {"pixel_id":"123","custom_event_type":"PURCHASE"})').option("--pacing-type <type>", "Pacing type (standard, no_pacing)").option("--cbo", "Enable campaign budget optimization").option("--adset-level-budgets", "Use ad set level budgets instead of campaign level").option("--start-time <time>", "Campaign start time (ISO 8601)").option("--stop-time <time>", "Campaign stop time (ISO 8601)").option("--adlabels <json>", "Ad labels as JSON array").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
     if (!opts.accountId) {
       throw new Error("Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID");
     }
@@ -954,13 +954,19 @@ function registerCampaignCommands(program2, getClient2) {
     if (opts.bidCap) body.bid_cap = opts.bidCap;
     if (opts.spendCap) body.spend_cap = opts.spendCap;
     if (opts.buyingType) body.buying_type = opts.buyingType;
+    if (opts.specialAdCategoryCountry) body.special_ad_category_country = JSON.stringify(opts.specialAdCategoryCountry.split(","));
+    if (opts.promotedObject) body.promoted_object = opts.promotedObject;
+    if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
+    if (opts.startTime) body.start_time = opts.startTime;
+    if (opts.stopTime) body.stop_time = opts.stopTime;
+    if (opts.adlabels) body.adlabels = opts.adlabels;
     const response = await client.request(`${opts.accountId}/campaigns`, {
       method: "POST",
       body
     });
     console.log(formatOutput(response.data, opts.output));
   }));
-  campaigns.command("update <campaignId>").description("Update an existing campaign").option("--name <name>", "New campaign name").option("--status <status>", "New status (ACTIVE, PAUSED, ARCHIVED)").option("--daily-budget <cents>", "New daily budget in cents").option("--lifetime-budget <cents>", "New lifetime budget in cents").option("--bid-strategy <strategy>", "New bid strategy").option("--bid-cap <cents>", "New bid cap in cents").option("--spend-cap <cents>", "New spend cap in cents").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (campaignId, opts) => {
+  campaigns.command("update <campaignId>").description("Update an existing campaign").option("--name <name>", "New campaign name").option("--status <status>", "New status (ACTIVE, PAUSED, ARCHIVED)").option("--daily-budget <cents>", "New daily budget in cents").option("--lifetime-budget <cents>", "New lifetime budget in cents").option("--bid-strategy <strategy>", "New bid strategy").option("--bid-cap <cents>", "New bid cap in cents").option("--spend-cap <cents>", "New spend cap in cents").option("--pacing-type <type>", "Pacing type (standard, no_pacing)").option("--start-time <time>", "Campaign start time (ISO 8601)").option("--stop-time <time>", "Campaign stop time (ISO 8601)").option("--adlabels <json>", "Ad labels as JSON array").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (campaignId, opts) => {
     const client = getClient2();
     const body = {};
     if (opts.name) body.name = opts.name;
@@ -970,6 +976,10 @@ function registerCampaignCommands(program2, getClient2) {
     if (opts.bidStrategy) body.bid_strategy = opts.bidStrategy;
     if (opts.bidCap) body.bid_cap = opts.bidCap;
     if (opts.spendCap) body.spend_cap = opts.spendCap;
+    if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
+    if (opts.startTime) body.start_time = opts.startTime;
+    if (opts.stopTime) body.stop_time = opts.stopTime;
+    if (opts.adlabels) body.adlabels = opts.adlabels;
     if (Object.keys(body).length === 0) {
       throw new Error("No update parameters provided");
     }
@@ -1001,7 +1011,7 @@ function registerAdSetCommands(program2, getClient2) {
     }
     const client = getClient2();
     const params = {
-      fields: "id,name,campaign_id,status,daily_budget,lifetime_budget,targeting,bid_amount,bid_strategy,optimization_goal,billing_event,start_time,end_time,is_dynamic_creative",
+      fields: "id,name,campaign_id,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,targeting,bid_amount,bid_strategy,optimization_goal,billing_event,start_time,end_time,is_dynamic_creative,learning_stage_info,issues_info,destination_type,promoted_object,created_time,updated_time",
       limit: opts.limit
     };
     if (opts.status) {
@@ -1023,12 +1033,12 @@ function registerAdSetCommands(program2, getClient2) {
   adsets.command("get <adsetId>").description("Get detailed info for a specific ad set").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (adsetId, opts) => {
     const client = getClient2();
     const params = {
-      fields: "id,name,campaign_id,status,daily_budget,lifetime_budget,targeting,bid_amount,bid_strategy,optimization_goal,billing_event,start_time,end_time,is_dynamic_creative,frequency_control_specs,promoted_object,destination_type"
+      fields: "id,name,campaign_id,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,daily_min_spend_target,daily_spend_cap,lifetime_min_spend_target,lifetime_spend_cap,targeting,bid_amount,bid_strategy,bid_adjustments,bid_constraints,optimization_goal,billing_event,start_time,end_time,adset_schedule,is_dynamic_creative,frequency_control_specs,promoted_object,destination_type,attribution_spec,learning_stage_info,issues_info,pacing_type,adlabels,dsa_beneficiary,dsa_payor,brand_safety_config,source_adset_id,created_time,updated_time"
     };
     const response = await client.request(adsetId, { params });
     console.log(formatOutput(response.data, opts.output));
   }));
-  adsets.command("create").description("Create a new ad set").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId2()).requiredOption("--campaign-id <id>", "Campaign ID").requiredOption("--name <name>", "Ad set name").requiredOption("--optimization-goal <goal>", "Optimization goal (LINK_CLICKS, REACH, CONVERSIONS, etc.)").requiredOption("--billing-event <event>", "Billing event (IMPRESSIONS, LINK_CLICKS, etc.)").option("--status <status>", "Initial status", "PAUSED").option("--daily-budget <cents>", "Daily budget in cents").option("--lifetime-budget <cents>", "Lifetime budget in cents").option("--bid-amount <cents>", "Bid amount in cents").option("--bid-strategy <strategy>", "Bid strategy").option("--targeting <json>", "Targeting spec as JSON string").option("--start-time <time>", "Start time (ISO 8601)").option("--end-time <time>", "End time (ISO 8601)").option("--promoted-object <json>", "Promoted object as JSON string").option("--dynamic-creative", "Enable dynamic creative").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
+  adsets.command("create").description("Create a new ad set").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId2()).requiredOption("--campaign-id <id>", "Campaign ID").requiredOption("--name <name>", "Ad set name").requiredOption("--optimization-goal <goal>", "Optimization goal (LINK_CLICKS, REACH, CONVERSIONS, VALUE, etc.)").requiredOption("--billing-event <event>", "Billing event (IMPRESSIONS, LINK_CLICKS, etc.)").option("--status <status>", "Initial status", "PAUSED").option("--daily-budget <cents>", "Daily budget in cents").option("--lifetime-budget <cents>", "Lifetime budget in cents").option("--daily-min-spend-target <cents>", "Minimum daily spend target in cents").option("--daily-spend-cap <cents>", "Maximum daily spend cap in cents").option("--lifetime-min-spend-target <cents>", "Minimum lifetime spend target in cents").option("--lifetime-spend-cap <cents>", "Maximum lifetime spend cap in cents").option("--bid-amount <cents>", "Bid amount in cents").option("--bid-strategy <strategy>", "Bid strategy (LOWEST_COST_WITHOUT_CAP, LOWEST_COST_WITH_BID_CAP, COST_CAP, LOWEST_COST_WITH_MIN_ROAS)").option("--targeting <json>", "Targeting spec as JSON string").option("--targeting-automation <json>", "Targeting automation config as JSON (v25: age/gender as suggestions)").option("--start-time <time>", "Start time (ISO 8601)").option("--end-time <time>", "End time (ISO 8601)").option("--adset-schedule <json>", "Dayparting schedule as JSON array").option("--promoted-object <json>", "Promoted object as JSON string").option("--destination-type <type>", "Destination type (WEBSITE, APP, MESSENGER, INSTAGRAM_DIRECT, WHATSAPP, etc.)").option("--attribution-spec <json>", 'Attribution spec as JSON (e.g., [{"event_type":"CLICK_THROUGH","window_days":7}])').option("--dynamic-creative", "Enable dynamic creative").option("--frequency-control-specs <json>", "Frequency capping as JSON array").option("--publisher-platforms <platforms>", "Comma-separated publisher platforms (facebook,instagram,threads,messenger,audience_network,whatsapp)").option("--facebook-positions <positions>", "Comma-separated Facebook positions (feed,story,reels,marketplace,video_feeds,instream_video,search,right_hand_column,profile_feed)").option("--instagram-positions <positions>", "Comma-separated Instagram positions (stream,story,explore,reels,explore_home,profile_feed,ig_search,profile_reels)").option("--threads-positions <positions>", "Comma-separated Threads positions (threads_stream)").option("--messenger-positions <positions>", "Comma-separated Messenger positions (sponsored_messages,story)").option("--whatsapp-positions <positions>", "Comma-separated WhatsApp positions (status)").option("--audience-network-positions <positions>", "Comma-separated Audience Network positions (classic,rewarded_video)").option("--device-platforms <platforms>", "Comma-separated device platforms (mobile,desktop)").option("--pacing-type <type>", "Pacing type (standard, no_pacing)").option("--dsa-beneficiary <name>", "EU/DSA ad beneficiary").option("--dsa-payor <name>", "EU/DSA ad payor").option("--adlabels <json>", "Ad labels as JSON array").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
     if (!opts.accountId) {
       throw new Error("Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID");
     }
@@ -1042,30 +1052,99 @@ function registerAdSetCommands(program2, getClient2) {
     };
     if (opts.dailyBudget) body.daily_budget = opts.dailyBudget;
     if (opts.lifetimeBudget) body.lifetime_budget = opts.lifetimeBudget;
+    if (opts.dailyMinSpendTarget) body.daily_min_spend_target = opts.dailyMinSpendTarget;
+    if (opts.dailySpendCap) body.daily_spend_cap = opts.dailySpendCap;
+    if (opts.lifetimeMinSpendTarget) body.lifetime_min_spend_target = opts.lifetimeMinSpendTarget;
+    if (opts.lifetimeSpendCap) body.lifetime_spend_cap = opts.lifetimeSpendCap;
     if (opts.bidAmount) body.bid_amount = opts.bidAmount;
     if (opts.bidStrategy) body.bid_strategy = opts.bidStrategy;
-    if (opts.targeting) body.targeting = opts.targeting;
+    if (opts.targetingAutomation) body.targeting_automation = opts.targetingAutomation;
     if (opts.startTime) body.start_time = opts.startTime;
     if (opts.endTime) body.end_time = opts.endTime;
+    if (opts.adsetSchedule) body.adset_schedule = opts.adsetSchedule;
     if (opts.promotedObject) body.promoted_object = opts.promotedObject;
+    if (opts.destinationType) body.destination_type = opts.destinationType;
+    if (opts.attributionSpec) body.attribution_spec = opts.attributionSpec;
     if (opts.dynamicCreative) body.is_dynamic_creative = "true";
+    if (opts.frequencyControlSpecs) body.frequency_control_specs = opts.frequencyControlSpecs;
+    if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
+    if (opts.dsaBeneficiary) body.dsa_beneficiary = opts.dsaBeneficiary;
+    if (opts.dsaPayor) body.dsa_payor = opts.dsaPayor;
+    if (opts.adlabels) body.adlabels = opts.adlabels;
+    const targeting = opts.targeting ? JSON.parse(opts.targeting) : {};
+    if (opts.publisherPlatforms) targeting.publisher_platforms = opts.publisherPlatforms.split(",");
+    if (opts.facebookPositions) targeting.facebook_positions = opts.facebookPositions.split(",");
+    if (opts.instagramPositions) targeting.instagram_positions = opts.instagramPositions.split(",");
+    if (opts.threadsPositions) targeting.threads_positions = opts.threadsPositions.split(",");
+    if (opts.messengerPositions) targeting.messenger_positions = opts.messengerPositions.split(",");
+    if (opts.whatsappPositions) targeting.whatsapp_positions = opts.whatsappPositions.split(",");
+    if (opts.audienceNetworkPositions) targeting.audience_network_positions = opts.audienceNetworkPositions.split(",");
+    if (opts.devicePlatforms) targeting.device_platforms = opts.devicePlatforms.split(",");
+    if (Object.keys(targeting).length > 0) body.targeting = JSON.stringify(targeting);
     const response = await client.request(`${opts.accountId}/adsets`, {
       method: "POST",
       body
     });
     console.log(formatOutput(response.data, opts.output));
   }));
-  adsets.command("update <adsetId>").description("Update an existing ad set").option("--name <name>", "New ad set name").option("--status <status>", "New status (ACTIVE, PAUSED, ARCHIVED)").option("--daily-budget <cents>", "New daily budget in cents").option("--lifetime-budget <cents>", "New lifetime budget in cents").option("--bid-amount <cents>", "New bid amount in cents").option("--bid-strategy <strategy>", "New bid strategy").option("--targeting <json>", "New targeting spec as JSON string").option("--optimization-goal <goal>", "New optimization goal").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (adsetId, opts) => {
+  adsets.command("update <adsetId>").description("Update an existing ad set").option("--name <name>", "New ad set name").option("--status <status>", "New status (ACTIVE, PAUSED, ARCHIVED)").option("--daily-budget <cents>", "New daily budget in cents").option("--lifetime-budget <cents>", "New lifetime budget in cents").option("--daily-min-spend-target <cents>", "Minimum daily spend target in cents").option("--daily-spend-cap <cents>", "Maximum daily spend cap in cents").option("--lifetime-min-spend-target <cents>", "Minimum lifetime spend target in cents").option("--lifetime-spend-cap <cents>", "Maximum lifetime spend cap in cents").option("--bid-amount <cents>", "New bid amount in cents").option("--bid-strategy <strategy>", "New bid strategy").option("--targeting <json>", "New targeting spec as JSON string").option("--targeting-automation <json>", "Targeting automation config as JSON").option("--optimization-goal <goal>", "New optimization goal").option("--start-time <time>", "New start time (ISO 8601)").option("--end-time <time>", "New end time (ISO 8601)").option("--adset-schedule <json>", "Dayparting schedule as JSON array").option("--attribution-spec <json>", "Attribution spec as JSON").option("--publisher-platforms <platforms>", "Comma-separated publisher platforms (facebook,instagram,threads,messenger,audience_network,whatsapp)").option("--facebook-positions <positions>", "Comma-separated Facebook positions").option("--instagram-positions <positions>", "Comma-separated Instagram positions").option("--threads-positions <positions>", "Comma-separated Threads positions").option("--messenger-positions <positions>", "Comma-separated Messenger positions").option("--whatsapp-positions <positions>", "Comma-separated WhatsApp positions").option("--audience-network-positions <positions>", "Comma-separated Audience Network positions").option("--device-platforms <platforms>", "Comma-separated device platforms (mobile,desktop)").option("--pacing-type <type>", "Pacing type (standard, no_pacing)").option("--dsa-beneficiary <name>", "EU/DSA ad beneficiary").option("--dsa-payor <name>", "EU/DSA ad payor").option("--adlabels <json>", "Ad labels as JSON array").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (adsetId, opts) => {
     const client = getClient2();
     const body = {};
     if (opts.name) body.name = opts.name;
     if (opts.status) body.status = opts.status;
     if (opts.dailyBudget) body.daily_budget = opts.dailyBudget;
     if (opts.lifetimeBudget) body.lifetime_budget = opts.lifetimeBudget;
+    if (opts.dailyMinSpendTarget) body.daily_min_spend_target = opts.dailyMinSpendTarget;
+    if (opts.dailySpendCap) body.daily_spend_cap = opts.dailySpendCap;
+    if (opts.lifetimeMinSpendTarget) body.lifetime_min_spend_target = opts.lifetimeMinSpendTarget;
+    if (opts.lifetimeSpendCap) body.lifetime_spend_cap = opts.lifetimeSpendCap;
     if (opts.bidAmount) body.bid_amount = opts.bidAmount;
     if (opts.bidStrategy) body.bid_strategy = opts.bidStrategy;
-    if (opts.targeting) body.targeting = opts.targeting;
+    if (opts.targetingAutomation) body.targeting_automation = opts.targetingAutomation;
     if (opts.optimizationGoal) body.optimization_goal = opts.optimizationGoal;
+    if (opts.startTime) body.start_time = opts.startTime;
+    if (opts.endTime) body.end_time = opts.endTime;
+    if (opts.adsetSchedule) body.adset_schedule = opts.adsetSchedule;
+    const targeting = opts.targeting ? JSON.parse(opts.targeting) : {};
+    let hasPlacement = false;
+    if (opts.publisherPlatforms) {
+      targeting.publisher_platforms = opts.publisherPlatforms.split(",");
+      hasPlacement = true;
+    }
+    if (opts.facebookPositions) {
+      targeting.facebook_positions = opts.facebookPositions.split(",");
+      hasPlacement = true;
+    }
+    if (opts.instagramPositions) {
+      targeting.instagram_positions = opts.instagramPositions.split(",");
+      hasPlacement = true;
+    }
+    if (opts.threadsPositions) {
+      targeting.threads_positions = opts.threadsPositions.split(",");
+      hasPlacement = true;
+    }
+    if (opts.messengerPositions) {
+      targeting.messenger_positions = opts.messengerPositions.split(",");
+      hasPlacement = true;
+    }
+    if (opts.whatsappPositions) {
+      targeting.whatsapp_positions = opts.whatsappPositions.split(",");
+      hasPlacement = true;
+    }
+    if (opts.audienceNetworkPositions) {
+      targeting.audience_network_positions = opts.audienceNetworkPositions.split(",");
+      hasPlacement = true;
+    }
+    if (opts.devicePlatforms) {
+      targeting.device_platforms = opts.devicePlatforms.split(",");
+      hasPlacement = true;
+    }
+    if (opts.targeting || hasPlacement) body.targeting = JSON.stringify(targeting);
+    if (opts.attributionSpec) body.attribution_spec = opts.attributionSpec;
+    if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
+    if (opts.dsaBeneficiary) body.dsa_beneficiary = opts.dsaBeneficiary;
+    if (opts.dsaPayor) body.dsa_payor = opts.dsaPayor;
+    if (opts.adlabels) body.adlabels = opts.adlabels;
     if (Object.keys(body).length === 0) {
       throw new Error("No update parameters provided");
     }
@@ -1097,7 +1176,7 @@ function registerAdCommands(program2, getClient2) {
     }
     const client = getClient2();
     const params = {
-      fields: "id,name,adset_id,campaign_id,status,creative,bid_amount,created_time,updated_time",
+      fields: "id,name,adset_id,campaign_id,status,effective_status,configured_status,creative,bid_amount,created_time,updated_time,issues_info,preview_shareable_link",
       limit: opts.limit
     };
     if (opts.status) {
@@ -1121,12 +1200,12 @@ function registerAdCommands(program2, getClient2) {
   ads.command("get <adId>").description("Get detailed info for a specific ad").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (adId, opts) => {
     const client = getClient2();
     const params = {
-      fields: "id,name,adset_id,campaign_id,status,creative,bid_amount,tracking_specs,created_time,updated_time,effective_status"
+      fields: "id,name,adset_id,campaign_id,status,effective_status,configured_status,creative,bid_amount,tracking_specs,conversion_domain,ad_review_feedback,issues_info,preview_shareable_link,ad_active_time,ad_schedule_start_time,ad_schedule_end_time,adlabels,source_ad_id,created_time,updated_time"
     };
     const response = await client.request(adId, { params });
     console.log(formatOutput(response.data, opts.output));
   }));
-  ads.command("create").description("Create a new ad").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId3()).requiredOption("--name <name>", "Ad name").requiredOption("--adset-id <id>", "Ad set ID").requiredOption("--creative-id <id>", "Creative ID").option("--status <status>", "Initial status", "PAUSED").option("--bid-amount <cents>", "Bid amount in cents").option("--tracking-specs <json>", "Tracking specs as JSON string").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
+  ads.command("create").description("Create a new ad").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId3()).requiredOption("--name <name>", "Ad name").requiredOption("--adset-id <id>", "Ad set ID").requiredOption("--creative-id <id>", "Creative ID").option("--status <status>", "Initial status", "PAUSED").option("--bid-amount <cents>", "Bid amount in cents").option("--tracking-specs <json>", "Tracking specs as JSON string").option("--conversion-domain <domain>", "Conversion domain for pixel events").option("--ad-schedule-start-time <time>", "Ad start time (ISO 8601, sales/app campaigns)").option("--ad-schedule-end-time <time>", "Ad end time (ISO 8601, sales/app campaigns)").option("--adlabels <json>", "Ad labels as JSON array").option("--engagement-audience", "Create engagement-based custom audience").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
     if (!opts.accountId) {
       throw new Error("Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID");
     }
@@ -1139,19 +1218,29 @@ function registerAdCommands(program2, getClient2) {
     };
     if (opts.bidAmount) body.bid_amount = opts.bidAmount;
     if (opts.trackingSpecs) body.tracking_specs = opts.trackingSpecs;
+    if (opts.conversionDomain) body.conversion_domain = opts.conversionDomain;
+    if (opts.adScheduleStartTime) body.ad_schedule_start_time = opts.adScheduleStartTime;
+    if (opts.adScheduleEndTime) body.ad_schedule_end_time = opts.adScheduleEndTime;
+    if (opts.adlabels) body.adlabels = opts.adlabels;
+    if (opts.engagementAudience) body.engagement_audience = "true";
     const response = await client.request(`${opts.accountId}/ads`, {
       method: "POST",
       body
     });
     console.log(formatOutput(response.data, opts.output));
   }));
-  ads.command("update <adId>").description("Update an existing ad").option("--name <name>", "New ad name").option("--status <status>", "New status (ACTIVE, PAUSED)").option("--bid-amount <cents>", "New bid amount").option("--creative-id <id>", "New creative ID").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (adId, opts) => {
+  ads.command("update <adId>").description("Update an existing ad").option("--name <name>", "New ad name").option("--status <status>", "New status (ACTIVE, PAUSED)").option("--bid-amount <cents>", "New bid amount").option("--creative-id <id>", "New creative ID").option("--tracking-specs <json>", "New tracking specs as JSON").option("--conversion-domain <domain>", "Conversion domain for pixel events").option("--ad-schedule-start-time <time>", "Ad start time (ISO 8601)").option("--ad-schedule-end-time <time>", "Ad end time (ISO 8601)").option("--adlabels <json>", "Ad labels as JSON array").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (adId, opts) => {
     const client = getClient2();
     const body = {};
     if (opts.name) body.name = opts.name;
     if (opts.status) body.status = opts.status;
     if (opts.bidAmount) body.bid_amount = opts.bidAmount;
     if (opts.creativeId) body.creative = JSON.stringify({ creative_id: opts.creativeId });
+    if (opts.trackingSpecs) body.tracking_specs = opts.trackingSpecs;
+    if (opts.conversionDomain) body.conversion_domain = opts.conversionDomain;
+    if (opts.adScheduleStartTime) body.ad_schedule_start_time = opts.adScheduleStartTime;
+    if (opts.adScheduleEndTime) body.ad_schedule_end_time = opts.adScheduleEndTime;
+    if (opts.adlabels) body.adlabels = opts.adlabels;
     if (Object.keys(body).length === 0) {
       throw new Error("No update parameters provided");
     }
@@ -1210,13 +1299,14 @@ function registerCreativeCommands(program2, getClient2) {
     const response = await client.request(`${adId}/adcreatives`, { params });
     console.log(formatOutput(response.data, opts.output));
   }));
-  creatives.command("create-image").description("Create an image ad creative").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId4()).requiredOption("--image-hash <hash>", "Image hash (from upload-image)").option("--name <name>", "Creative name").option("--page-id <id>", "Facebook Page ID").option("--link-url <url>", "Destination URL").option("--message <text>", "Ad body text").option("--headline <text>", "Ad headline").option("--description <text>", "Ad description").option("--cta <type>", "Call to action type (LEARN_MORE, SHOP_NOW, SIGN_UP, etc.)").option("--instagram-actor-id <id>", "Instagram account ID").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
+  creatives.command("create-image").description("Create an image ad creative").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId4()).requiredOption("--image-hash <hash>", "Image hash (from upload-image)").option("--name <name>", "Creative name").option("--page-id <id>", "Facebook Page ID").option("--instagram-actor-id <id>", "Instagram account ID").option("--link-url <url>", "Destination URL").option("--message <text>", "Ad body text").option("--headline <text>", "Ad headline").option("--description <text>", "Ad description").option("--caption <text>", "Link caption (display URL)").option("--cta <type>", "Call to action type (LEARN_MORE, SHOP_NOW, SIGN_UP, etc.)").option("--url-tags <tags>", "URL tracking tags appended to link").option("--child-attachments <json>", "JSON array for carousel ads").option("--multi-share-optimized", "Optimize carousel card order").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
     if (!opts.accountId) {
       throw new Error("Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID");
     }
     const client = getClient2();
     const body = {};
     if (opts.name) body.name = opts.name;
+    if (opts.urlTags) body.url_tags = opts.urlTags;
     const linkData = {
       image_hash: opts.imageHash
     };
@@ -1224,14 +1314,13 @@ function registerCreativeCommands(program2, getClient2) {
     if (opts.message) linkData.message = opts.message;
     if (opts.headline) linkData.name = opts.headline;
     if (opts.description) linkData.description = opts.description;
-    if (opts.cta) {
-      linkData.call_to_action = { type: opts.cta };
-    }
-    const objectStorySpec = {
-      link_data: linkData
-    };
+    if (opts.caption) linkData.caption = opts.caption;
+    if (opts.cta) linkData.call_to_action = { type: opts.cta };
+    if (opts.childAttachments) linkData.child_attachments = JSON.parse(opts.childAttachments);
+    if (opts.multiShareOptimized) linkData.multi_share_optimized = true;
+    const objectStorySpec = { link_data: linkData };
     if (opts.pageId) objectStorySpec.page_id = opts.pageId;
-    if (opts.instagramActorId) objectStorySpec.instagram_actor_id = opts.instagramActorId;
+    if (opts.instagramActorId) objectStorySpec.instagram_user_id = opts.instagramActorId;
     body.object_story_spec = JSON.stringify(objectStorySpec);
     const response = await client.request(`${opts.accountId}/adcreatives`, {
       method: "POST",
@@ -1239,37 +1328,123 @@ function registerCreativeCommands(program2, getClient2) {
     });
     console.log(formatOutput(response.data, opts.output));
   }));
-  creatives.command("create-video").description("Create a video ad creative").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId4()).requiredOption("--video-id <id>", "Video ID (from upload-video)").requiredOption("--page-id <id>", "Facebook Page ID").option("--name <name>", "Creative name").option("--message <text>", "Ad body text").option("--link-url <url>", "Destination URL").option("--cta <type>", "Call to action type", "LEARN_MORE").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
+  creatives.command("create-video").description("Create a video ad creative").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId4()).requiredOption("--video-id <id>", "Video ID (from upload-video)").requiredOption("--page-id <id>", "Facebook Page ID").option("--name <name>", "Creative name").option("--instagram-actor-id <id>", "Instagram account ID").option("--message <text>", "Ad body text").option("--headline <text>", "Ad headline (video title)").option("--description <text>", "Ad description").option("--link-url <url>", "Destination URL").option("--caption <text>", "Link caption (display URL)").option("--cta <type>", "Call to action type", "LEARN_MORE").option("--thumbnail <hash>", "Image hash for video thumbnail").option("--url-tags <tags>", "URL tracking tags appended to link").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (opts) => {
     if (!opts.accountId) {
       throw new Error("Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID");
     }
     const client = getClient2();
     const body = {};
     if (opts.name) body.name = opts.name;
+    if (opts.urlTags) body.url_tags = opts.urlTags;
     const videoData = {
-      video_id: opts.videoId,
-      message: opts.message || "",
-      call_to_action: {
-        type: opts.cta,
-        value: opts.linkUrl ? { link: opts.linkUrl } : void 0
-      }
+      video_id: opts.videoId
     };
-    body.object_story_spec = JSON.stringify({
+    if (opts.message) videoData.message = opts.message;
+    if (opts.headline) videoData.title = opts.headline;
+    if (opts.description) videoData.link_description = opts.description;
+    if (opts.thumbnail) videoData.image_hash = opts.thumbnail;
+    const ctaValue = {};
+    if (opts.linkUrl) ctaValue.link = opts.linkUrl;
+    if (opts.caption) ctaValue.link_caption = opts.caption;
+    videoData.call_to_action = {
+      type: opts.cta,
+      ...Object.keys(ctaValue).length > 0 ? { value: ctaValue } : {}
+    };
+    const objectStorySpec = {
       page_id: opts.pageId,
       video_data: videoData
-    });
+    };
+    if (opts.instagramActorId) objectStorySpec.instagram_user_id = opts.instagramActorId;
+    body.object_story_spec = JSON.stringify(objectStorySpec);
     const response = await client.request(`${opts.accountId}/adcreatives`, {
       method: "POST",
       body
     });
     console.log(formatOutput(response.data, opts.output));
   }));
-  creatives.command("update <creativeId>").description("Update a creative").option("--name <name>", "New creative name").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (creativeId, opts) => {
+  creatives.command("clone <creativeId>").description("Clone an existing creative with field overrides").requiredOption("--account-id <id>", "Ad account ID (act_XXX)", getDefaultAccountId4()).option("--name <name>", "New creative name").option("--message <text>", "Override ad body text").option("--headline <text>", "Override ad headline").option("--description <text>", "Override ad description").option("--caption <text>", "Override link caption (display URL)").option("--link-url <url>", "Override destination URL").option("--cta <type>", "Override call to action type").option("--image-hash <hash>", "Override image hash").option("--url-tags <tags>", "Override URL tracking tags").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (creativeId, opts) => {
+    if (!opts.accountId) {
+      throw new Error("Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID");
+    }
+    const client = getClient2();
+    const source = await client.request(creativeId, {
+      params: { fields: "name,object_story_spec" }
+    });
+    const sourceData = source.data;
+    const sourceSpec = sourceData.object_story_spec || {};
+    const sourceLinkData = sourceSpec.link_data || {};
+    const sourceVideoData = sourceSpec.video_data || {};
+    const body = {};
+    body.name = opts.name || `${sourceData.name || "Creative"} - copy`;
+    if (opts.urlTags) body.url_tags = opts.urlTags;
+    if (sourceLinkData.image_hash || sourceLinkData.link) {
+      const linkData = { ...sourceLinkData };
+      if (opts.message) linkData.message = opts.message;
+      if (opts.headline) linkData.name = opts.headline;
+      if (opts.description) linkData.description = opts.description;
+      if (opts.caption) linkData.caption = opts.caption;
+      if (opts.linkUrl) linkData.link = opts.linkUrl;
+      if (opts.imageHash) linkData.image_hash = opts.imageHash;
+      if (opts.cta) linkData.call_to_action = { type: opts.cta };
+      body.object_story_spec = JSON.stringify({
+        ...sourceSpec,
+        link_data: linkData
+      });
+    } else if (sourceVideoData.video_id) {
+      const videoData = { ...sourceVideoData };
+      if (opts.message) videoData.message = opts.message;
+      if (opts.headline) videoData.title = opts.headline;
+      if (opts.description) videoData.link_description = opts.description;
+      if (opts.imageHash) videoData.image_hash = opts.imageHash;
+      if (opts.cta || opts.linkUrl || opts.caption) {
+        const existingCta = videoData.call_to_action || {};
+        const existingValue = existingCta.value || {};
+        const ctaValue = { ...existingValue };
+        if (opts.linkUrl) ctaValue.link = opts.linkUrl;
+        if (opts.caption) ctaValue.link_caption = opts.caption;
+        videoData.call_to_action = {
+          type: opts.cta || existingCta.type || "LEARN_MORE",
+          ...Object.keys(ctaValue).length > 0 ? { value: ctaValue } : {}
+        };
+      }
+      body.object_story_spec = JSON.stringify({
+        ...sourceSpec,
+        video_data: videoData
+      });
+    } else {
+      throw new Error("Unsupported creative type. Only image and video creatives can be cloned.");
+    }
+    const response = await client.request(`${opts.accountId}/adcreatives`, {
+      method: "POST",
+      body
+    });
+    console.log(formatOutput(response.data, opts.output));
+  }));
+  creatives.command("update <creativeId>").description("Update a creative (name or object_story_spec fields)").option("--name <name>", "New creative name").option("--caption <text>", "Link caption (display URL)").option("--message <text>", "Ad body text").option("--headline <text>", "Ad headline").option("--description <text>", "Ad description").option("--link-url <url>", "Destination URL").option("--cta <type>", "Call to action type (LEARN_MORE, SHOP_NOW, SIGN_UP, etc.)").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (creativeId, opts) => {
     const client = getClient2();
     const body = {};
     if (opts.name) body.name = opts.name;
+    const hasStoryUpdate = opts.caption || opts.message || opts.headline || opts.description || opts.linkUrl || opts.cta;
+    if (hasStoryUpdate) {
+      const current = await client.request(creativeId, {
+        params: { fields: "object_story_spec" }
+      });
+      const currentSpec = current.data.object_story_spec || {};
+      const currentLinkData = currentSpec.link_data || {};
+      const linkData = { ...currentLinkData };
+      if (opts.caption) linkData.caption = opts.caption;
+      if (opts.message) linkData.message = opts.message;
+      if (opts.headline) linkData.name = opts.headline;
+      if (opts.description) linkData.description = opts.description;
+      if (opts.linkUrl) linkData.link = opts.linkUrl;
+      if (opts.cta) linkData.call_to_action = { type: opts.cta };
+      body.object_story_spec = JSON.stringify({
+        ...currentSpec,
+        link_data: linkData
+      });
+    }
     if (Object.keys(body).length === 0) {
-      throw new Error("No update parameters provided");
+      throw new Error("No update parameters provided. Use --name, --caption, --message, --headline, --description, --link-url, or --cta");
     }
     const response = await client.request(creativeId, {
       method: "POST",
@@ -1354,6 +1529,47 @@ function registerCreativeCommands(program2, getClient2) {
   }));
 }
 
+// src/time-range.ts
+function resolveTimeRange(timeRange) {
+  if (!timeRange || timeRange === "maximum") return void 0;
+  const now = /* @__PURE__ */ new Date();
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  const ranges = {
+    today: () => ({ since: fmt(now), until: fmt(now) }),
+    yesterday: () => {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 1);
+      return { since: fmt(d), until: fmt(d) };
+    },
+    last_7d: () => {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 7);
+      return { since: fmt(d), until: fmt(now) };
+    },
+    last_30d: () => {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 30);
+      return { since: fmt(d), until: fmt(now) };
+    },
+    last_90d: () => {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 90);
+      return { since: fmt(d), until: fmt(now) };
+    },
+    this_month: () => {
+      const start = new Date(now.getFullYear(), now.getMonth(), 1);
+      return { since: fmt(start), until: fmt(now) };
+    },
+    last_month: () => {
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const end = new Date(now.getFullYear(), now.getMonth(), 0);
+      return { since: fmt(start), until: fmt(end) };
+    }
+  };
+  const resolver = ranges[timeRange];
+  return resolver ? JSON.stringify(resolver()) : void 0;
+}
+
 // src/commands/insights.ts
 function getDefaultAccountId5() {
   return process.env.META_ADS_CLI_ACCOUNT_ID || "";
@@ -1362,7 +1578,7 @@ function registerInsightCommands(program2, getClient2) {
   const insights = program2.command("insights").description("Performance analytics and reporting");
   insights.command("get <objectId>").description("Get performance insights for any object (account, campaign, adset, ad)").option("--time-range <range>", "Time range: today, yesterday, last_7d, last_30d, last_90d, this_month, last_month, maximum", "last_30d").option("--date-start <date>", "Custom date range start (YYYY-MM-DD)").option("--date-end <date>", "Custom date range end (YYYY-MM-DD)").option("--breakdown <breakdown>", "Breakdown: age, gender, country, device, platform, publisher_platform, impression_device").option("--level <level>", "Level of aggregation: account, campaign, adset, ad", "ad").option("--fields <fields>", "Comma-separated metric fields").option("--limit <n>", "Maximum number of results", "25").option("--after <cursor>", "Pagination cursor").option("--all", "Fetch all pages").option("--page-limit <n>", "Max pages when using --all").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (objectId, opts) => {
     const client = getClient2();
-    const defaultFields = "impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,conversions,cost_per_action_type,date_start,date_stop";
+    const defaultFields = "impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,conversions,cost_per_action_type,purchase_roas,website_purchase_roas,date_start,date_stop";
     const params = {
       fields: opts.fields || defaultFields,
       limit: opts.limit,
@@ -1374,42 +1590,8 @@ function registerInsightCommands(program2, getClient2) {
         until: opts.dateEnd
       });
     } else {
-      const rangeMap = {};
-      const now = /* @__PURE__ */ new Date();
-      const fmt = (d) => d.toISOString().slice(0, 10);
-      const yesterday = new Date(now);
-      yesterday.setDate(yesterday.getDate() - 1);
-      const ranges = {
-        today: () => ({ since: fmt(now), until: fmt(now) }),
-        yesterday: () => ({ since: fmt(yesterday), until: fmt(yesterday) }),
-        last_7d: () => {
-          const d = new Date(now);
-          d.setDate(d.getDate() - 7);
-          return { since: fmt(d), until: fmt(now) };
-        },
-        last_30d: () => {
-          const d = new Date(now);
-          d.setDate(d.getDate() - 30);
-          return { since: fmt(d), until: fmt(now) };
-        },
-        last_90d: () => {
-          const d = new Date(now);
-          d.setDate(d.getDate() - 90);
-          return { since: fmt(d), until: fmt(now) };
-        },
-        this_month: () => {
-          const start = new Date(now.getFullYear(), now.getMonth(), 1);
-          return { since: fmt(start), until: fmt(now) };
-        },
-        last_month: () => {
-          const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-          const end = new Date(now.getFullYear(), now.getMonth(), 0);
-          return { since: fmt(start), until: fmt(end) };
-        }
-      };
-      if (opts.timeRange !== "maximum" && ranges[opts.timeRange]) {
-        params.time_range = JSON.stringify(ranges[opts.timeRange]());
-      }
+      const resolved = resolveTimeRange(opts.timeRange);
+      if (resolved) params.time_range = resolved;
     }
     if (opts.breakdown) {
       params.breakdowns = opts.breakdown;
@@ -1431,9 +1613,11 @@ function registerInsightCommands(program2, getClient2) {
     }
     const client = getClient2();
     const params = {
-      fields: "impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,date_start,date_stop",
+      fields: "impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,conversions,cost_per_action_type,purchase_roas,date_start,date_stop",
       level: "account"
     };
+    const resolved = resolveTimeRange(opts.timeRange);
+    if (resolved) params.time_range = resolved;
     if (opts.breakdown) {
       params.breakdowns = opts.breakdown;
     }
@@ -1445,6 +1629,8 @@ function registerInsightCommands(program2, getClient2) {
     const params = {
       fields: "video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,video_avg_time_watched_actions,video_thruplay_watched_actions,impressions,reach,spend"
     };
+    const resolved = resolveTimeRange(opts.timeRange);
+    if (resolved) params.time_range = resolved;
     const response = await client.request(`${adId}/insights`, { params });
     console.log(formatOutput(response.data, opts.output));
   }));
@@ -2729,9 +2915,12 @@ function registerAbTestingCommands(program2, getClient2) {
   abtest.command("analyze <campaignIdA> <campaignIdB>").description("Analyze A/B test results by comparing two campaigns").option("--time-range <range>", "Time range for comparison", "last_7d").option("--metrics <fields>", "Metrics to compare", "impressions,clicks,spend,cpc,cpm,ctr,conversions,cost_per_action_type").option("-o, --output <format>", "Output format", "json").action(handleErrors(async (campaignIdA, campaignIdB, opts) => {
     const client = getClient2();
     const insightFields = opts.metrics;
+    const insightParams = { fields: insightFields };
+    const resolved = resolveTimeRange(opts.timeRange);
+    if (resolved) insightParams.time_range = resolved;
     const [insightsA, insightsB] = await Promise.all([
-      client.request(`${campaignIdA}/insights`, { params: { fields: insightFields } }),
-      client.request(`${campaignIdB}/insights`, { params: { fields: insightFields } })
+      client.request(`${campaignIdA}/insights`, { params: insightParams }),
+      client.request(`${campaignIdB}/insights`, { params: insightParams })
     ]);
     const [campaignA, campaignB] = await Promise.all([
       client.request(campaignIdA, { params: { fields: "id,name,bid_strategy,daily_budget,status" } }),
@@ -3154,7 +3343,10 @@ function registerBulkCommands(program2, getClient2) {
       try {
         const [entity, insights] = await Promise.all([
           client.request(id, { params: { fields: "id,name,status" } }),
-          client.request(`${id}/insights`, { params: { fields: opts.metrics } })
+          client.request(`${id}/insights`, { params: {
+            fields: opts.metrics,
+            ...resolveTimeRange(opts.timeRange) ? { time_range: resolveTimeRange(opts.timeRange) } : {}
+          } })
         ]);
         results.push({
           entity: entity.data,
@@ -3267,6 +3459,8 @@ function registerInstagramCommands(program2, getClient2) {
       period: "day",
       metric: "impressions,reach,profile_views,website_clicks"
     };
+    const resolved = resolveTimeRange(opts.timeRange);
+    if (resolved) params.time_range = resolved;
     const response = await client.request(`${instagramId}/insights`, { params });
     console.log(formatOutput(response.data, opts.output));
   }));
@@ -4013,10 +4207,10 @@ function printStaticInstructions() {
 
 // src/index.ts
 var program = new Command();
-program.name("meta-ads").description("Meta Ads CLI - Manage Facebook & Instagram advertising via the Graph API").version("0.2.0").option("--dry-run", "Preview the API request without executing it").option("--read-only", "Restrict to read-only operations (block POST/DELETE)").option("--api-version <version>", "Graph API version (default: v24.0)", "v24.0");
+program.name("meta-ads").description("Meta Ads CLI - Manage Facebook & Instagram advertising via the Graph API").version("0.2.0").option("--dry-run", "Preview the API request without executing it").option("--read-only", "Restrict to read-only operations (block POST/DELETE)").option("--api-version <version>", "Graph API version (default: v25.0)", "v25.0");
 var dryRun = process.argv.includes("--dry-run");
 var readOnly = process.argv.includes("--read-only");
-var apiVersion = "v24.0";
+var apiVersion = "v25.0";
 var apiIdx = process.argv.indexOf("--api-version");
 if (apiIdx !== -1 && process.argv[apiIdx + 1]) {
   apiVersion = process.argv[apiIdx + 1];

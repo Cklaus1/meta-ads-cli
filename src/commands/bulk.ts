@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { resolveTimeRange } from '../time-range.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -116,7 +117,10 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
         try {
           const [entity, insights] = await Promise.all([
             client.request(id, { params: { fields: 'id,name,status' } }),
-            client.request(`${id}/insights`, { params: { fields: opts.metrics } }),
+            client.request(`${id}/insights`, { params: {
+              fields: opts.metrics,
+              ...(resolveTimeRange(opts.timeRange) ? { time_range: resolveTimeRange(opts.timeRange)! } : {}),
+            } }),
           ]);
           results.push({
             entity: entity.data,

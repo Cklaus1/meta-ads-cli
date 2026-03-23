@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { AuthManager } from '../auth.js';
+import { API_VERSION } from '../meta-client.js';
 
 export function registerAuthCommands(program: Command, getAuth: () => AuthManager): void {
   const auth = program.command('auth').description('Authentication management');
@@ -78,7 +79,7 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
         process.exit(1);
       }
       const scope = 'business_management,public_profile,pages_show_list,pages_read_engagement,ads_management,ads_read,read_insights,leads_retrieval';
-      const url = `https://www.facebook.com/v24.0/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent('http://localhost:8899/callback')}&scope=${scope}&response_type=token`;
+      const url = `https://www.facebook.com/${API_VERSION}/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent('http://localhost:8899/callback')}&scope=${scope}&response_type=token`;
       console.log('\nOpen this URL in your browser to authenticate:\n');
       console.log(`  ${url}\n`);
     });
@@ -99,7 +100,7 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
           process.exit(1);
         }
 
-        const url = `https://graph.facebook.com/v24.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${token}`;
+        const url = `https://graph.facebook.com/${API_VERSION}/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${token}`;
         const response = await fetch(url);
         if (!response.ok) {
           const err = await response.text();

@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import http from 'http';
 import logger from './logger.js';
+import { API_VERSION } from './meta-client.js';
 
 const SERVICE_NAME = 'meta-ads-cli';
 const TOKEN_CACHE_ACCOUNT = 'meta-token-cache';
@@ -207,7 +208,7 @@ export class AuthManager {
       });
 
       server.listen(8899, () => {
-        const authUrl = `https://www.facebook.com/v24.0/dialog/oauth?client_id=${this.appId}&redirect_uri=${encodeURIComponent(AUTH_REDIRECT_URI)}&scope=${AUTH_SCOPE}&response_type=token`;
+        const authUrl = `https://www.facebook.com/${API_VERSION}/dialog/oauth?client_id=${this.appId}&redirect_uri=${encodeURIComponent(AUTH_REDIRECT_URI)}&scope=${AUTH_SCOPE}&response_type=token`;
         console.log('\nOpen this URL in your browser to authenticate:\n');
         console.log(`  ${authUrl}\n`);
         console.log('Waiting for authentication...\n');
@@ -222,7 +223,7 @@ export class AuthManager {
   }
 
   private async exchangeForLongLivedToken(shortLivedToken: string): Promise<TokenData | null> {
-    const url = `https://graph.facebook.com/v24.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${this.appId}&client_secret=${this.appSecret}&fb_exchange_token=${shortLivedToken}`;
+    const url = `https://graph.facebook.com/${API_VERSION}/oauth/access_token?grant_type=fb_exchange_token&client_id=${this.appId}&client_secret=${this.appSecret}&fb_exchange_token=${shortLivedToken}`;
     const response = await fetch(url);
     if (!response.ok) return null;
     const data = await response.json() as { access_token?: string; expires_in?: number };
@@ -250,7 +251,7 @@ export class AuthManager {
     try {
       const token = await this.getToken();
       const response = await fetch(
-        `https://graph.facebook.com/v24.0/me?access_token=${token}`
+        `https://graph.facebook.com/${API_VERSION}/me?access_token=${token}`
       );
       if (response.ok) {
         const data = await response.json() as { name: string; id: string };

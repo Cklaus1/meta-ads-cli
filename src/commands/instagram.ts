@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { resolveTimeRange } from '../time-range.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -123,6 +124,9 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
         period: 'day',
         metric: 'impressions,reach,profile_views,website_clicks',
       };
+
+      const resolved = resolveTimeRange(opts.timeRange);
+      if (resolved) params.time_range = resolved;
 
       const response = await client.request(`${instagramId}/insights`, { params });
       console.log(formatOutput(response.data, opts.output as OutputFormat));

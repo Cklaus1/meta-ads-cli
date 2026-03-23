@@ -72,12 +72,16 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
     .requiredOption('--image-hash <hash>', 'Image hash (from upload-image)')
     .option('--name <name>', 'Creative name')
     .option('--page-id <id>', 'Facebook Page ID')
+    .option('--instagram-actor-id <id>', 'Instagram account ID')
     .option('--link-url <url>', 'Destination URL')
     .option('--message <text>', 'Ad body text')
     .option('--headline <text>', 'Ad headline')
     .option('--description <text>', 'Ad description')
+    .option('--caption <text>', 'Link caption (display URL)')
     .option('--cta <type>', 'Call to action type (LEARN_MORE, SHOP_NOW, SIGN_UP, etc.)')
-    .option('--instagram-actor-id <id>', 'Instagram account ID')
+    .option('--url-tags <tags>', 'URL tracking tags appended to link')
+    .option('--child-attachments <json>', 'JSON array for carousel ads')
+    .option('--multi-share-optimized', 'Optimize carousel card order')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) {
@@ -87,8 +91,8 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
       const body: Record<string, string> = {};
 
       if (opts.name) body.name = opts.name;
+      if (opts.urlTags) body.url_tags = opts.urlTags;
 
-      // Build object_story_spec
       const linkData: Record<string, unknown> = {
         image_hash: opts.imageHash,
       };
@@ -96,15 +100,14 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
       if (opts.message) linkData.message = opts.message;
       if (opts.headline) linkData.name = opts.headline;
       if (opts.description) linkData.description = opts.description;
-      if (opts.cta) {
-        linkData.call_to_action = { type: opts.cta };
-      }
+      if (opts.caption) linkData.caption = opts.caption;
+      if (opts.cta) linkData.call_to_action = { type: opts.cta };
+      if (opts.childAttachments) linkData.child_attachments = JSON.parse(opts.childAttachments);
+      if (opts.multiShareOptimized) linkData.multi_share_optimized = true;
 
-      const objectStorySpec: Record<string, unknown> = {
-        link_data: linkData,
-      };
+      const objectStorySpec: Record<string, unknown> = { link_data: linkData };
       if (opts.pageId) objectStorySpec.page_id = opts.pageId;
-      if (opts.instagramActorId) objectStorySpec.instagram_actor_id = opts.instagramActorId;
+      if (opts.instagramActorId) objectStorySpec.instagram_user_id = opts.instagramActorId;
 
       body.object_story_spec = JSON.stringify(objectStorySpec);
 
@@ -123,9 +126,15 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
     .requiredOption('--video-id <id>', 'Video ID (from upload-video)')
     .requiredOption('--page-id <id>', 'Facebook Page ID')
     .option('--name <name>', 'Creative name')
+    .option('--instagram-actor-id <id>', 'Instagram account ID')
     .option('--message <text>', 'Ad body text')
+    .option('--headline <text>', 'Ad headline (video title)')
+    .option('--description <text>', 'Ad description')
     .option('--link-url <url>', 'Destination URL')
+    .option('--caption <text>', 'Link caption (display URL)')
     .option('--cta <type>', 'Call to action type', 'LEARN_MORE')
+    .option('--thumbnail <hash>', 'Image hash for video thumbnail')
+    .option('--url-tags <tags>', 'URL tracking tags appended to link')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) {
@@ -135,20 +144,113 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
       const body: Record<string, string> = {};
 
       if (opts.name) body.name = opts.name;
+      if (opts.urlTags) body.url_tags = opts.urlTags;
 
       const videoData: Record<string, unknown> = {
         video_id: opts.videoId,
-        message: opts.message || '',
-        call_to_action: {
-          type: opts.cta,
-          value: opts.linkUrl ? { link: opts.linkUrl } : undefined,
-        },
+      };
+      if (opts.message) videoData.message = opts.message;
+      if (opts.headline) videoData.title = opts.headline;
+      if (opts.description) videoData.link_description = opts.description;
+      if (opts.thumbnail) videoData.image_hash = opts.thumbnail;
+      const ctaValue: Record<string, unknown> = {};
+      if (opts.linkUrl) ctaValue.link = opts.linkUrl;
+      if (opts.caption) ctaValue.link_caption = opts.caption;
+      videoData.call_to_action = {
+        type: opts.cta,
+        ...(Object.keys(ctaValue).length > 0 ? { value: ctaValue } : {}),
       };
 
-      body.object_story_spec = JSON.stringify({
+      const objectStorySpec: Record<string, unknown> = {
         page_id: opts.pageId,
         video_data: videoData,
+      };
+      if (opts.instagramActorId) objectStorySpec.instagram_user_id = opts.instagramActorId;
+
+      body.object_story_spec = JSON.stringify(objectStorySpec);
+
+      const response = await client.request(`${opts.accountId}/adcreatives`, {
+        method: 'POST',
+        body,
       });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  creatives
+    .command('clone <creativeId>')
+    .description('Clone an existing creative with field overrides')
+    .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
+    .option('--name <name>', 'New creative name')
+    .option('--message <text>', 'Override ad body text')
+    .option('--headline <text>', 'Override ad headline')
+    .option('--description <text>', 'Override ad description')
+    .option('--caption <text>', 'Override link caption (display URL)')
+    .option('--link-url <url>', 'Override destination URL')
+    .option('--cta <type>', 'Override call to action type')
+    .option('--image-hash <hash>', 'Override image hash')
+    .option('--url-tags <tags>', 'Override URL tracking tags')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (creativeId: string, opts) => {
+      if (!opts.accountId) {
+        throw new Error('Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
+      }
+      const client = getClient();
+
+      // Fetch the source creative
+      const source = await client.request(creativeId, {
+        params: { fields: 'name,object_story_spec' },
+      });
+      const sourceData = source.data as Record<string, unknown>;
+      const sourceSpec = sourceData.object_story_spec as Record<string, unknown> || {};
+      const sourceLinkData = (sourceSpec.link_data || {}) as Record<string, unknown>;
+      const sourceVideoData = (sourceSpec.video_data || {}) as Record<string, unknown>;
+
+      const body: Record<string, string> = {};
+      body.name = opts.name || `${sourceData.name || 'Creative'} - copy`;
+      if (opts.urlTags) body.url_tags = opts.urlTags;
+
+      if (sourceLinkData.image_hash || sourceLinkData.link) {
+        // Image creative — clone link_data with overrides
+        const linkData: Record<string, unknown> = { ...sourceLinkData };
+        if (opts.message) linkData.message = opts.message;
+        if (opts.headline) linkData.name = opts.headline;
+        if (opts.description) linkData.description = opts.description;
+        if (opts.caption) linkData.caption = opts.caption;
+        if (opts.linkUrl) linkData.link = opts.linkUrl;
+        if (opts.imageHash) linkData.image_hash = opts.imageHash;
+        if (opts.cta) linkData.call_to_action = { type: opts.cta };
+
+        body.object_story_spec = JSON.stringify({
+          ...sourceSpec,
+          link_data: linkData,
+        });
+      } else if (sourceVideoData.video_id) {
+        // Video creative — clone video_data with overrides
+        const videoData: Record<string, unknown> = { ...sourceVideoData };
+        if (opts.message) videoData.message = opts.message;
+        if (opts.headline) videoData.title = opts.headline;
+        if (opts.description) videoData.link_description = opts.description;
+        if (opts.imageHash) videoData.image_hash = opts.imageHash;
+        if (opts.cta || opts.linkUrl || opts.caption) {
+          const existingCta = (videoData.call_to_action || {}) as Record<string, unknown>;
+          const existingValue = (existingCta.value || {}) as Record<string, unknown>;
+          const ctaValue: Record<string, unknown> = { ...existingValue };
+          if (opts.linkUrl) ctaValue.link = opts.linkUrl;
+          if (opts.caption) ctaValue.link_caption = opts.caption;
+          videoData.call_to_action = {
+            type: opts.cta || existingCta.type || 'LEARN_MORE',
+            ...(Object.keys(ctaValue).length > 0 ? { value: ctaValue } : {}),
+          };
+        }
+
+        body.object_story_spec = JSON.stringify({
+          ...sourceSpec,
+          video_data: videoData,
+        });
+      } else {
+        throw new Error('Unsupported creative type. Only image and video creatives can be cloned.');
+      }
 
       const response = await client.request(`${opts.accountId}/adcreatives`, {
         method: 'POST',
@@ -160,8 +262,14 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
 
   creatives
     .command('update <creativeId>')
-    .description('Update a creative')
+    .description('Update a creative (name or object_story_spec fields)')
     .option('--name <name>', 'New creative name')
+    .option('--caption <text>', 'Link caption (display URL)')
+    .option('--message <text>', 'Ad body text')
+    .option('--headline <text>', 'Ad headline')
+    .option('--description <text>', 'Ad description')
+    .option('--link-url <url>', 'Destination URL')
+    .option('--cta <type>', 'Call to action type (LEARN_MORE, SHOP_NOW, SIGN_UP, etc.)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (creativeId: string, opts) => {
       const client = getClient();
@@ -169,8 +277,34 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
 
       if (opts.name) body.name = opts.name;
 
+      // Build object_story_spec update if any link_data fields are provided
+      const hasStoryUpdate = opts.caption || opts.message || opts.headline
+        || opts.description || opts.linkUrl || opts.cta;
+
+      if (hasStoryUpdate) {
+        // Fetch current creative to merge updates
+        const current = await client.request(creativeId, {
+          params: { fields: 'object_story_spec' },
+        });
+        const currentSpec = (current.data as Record<string, unknown>).object_story_spec as Record<string, unknown> || {};
+        const currentLinkData = (currentSpec.link_data || {}) as Record<string, unknown>;
+
+        const linkData: Record<string, unknown> = { ...currentLinkData };
+        if (opts.caption) linkData.caption = opts.caption;
+        if (opts.message) linkData.message = opts.message;
+        if (opts.headline) linkData.name = opts.headline;
+        if (opts.description) linkData.description = opts.description;
+        if (opts.linkUrl) linkData.link = opts.linkUrl;
+        if (opts.cta) linkData.call_to_action = { type: opts.cta };
+
+        body.object_story_spec = JSON.stringify({
+          ...currentSpec,
+          link_data: linkData,
+        });
+      }
+
       if (Object.keys(body).length === 0) {
-        throw new Error('No update parameters provided');
+        throw new Error('No update parameters provided. Use --name, --caption, --message, --headline, --description, --link-url, or --cta');
       }
 
       const response = await client.request(creativeId, {

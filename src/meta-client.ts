@@ -4,7 +4,7 @@ import logger from './logger.js';
 
 const MAX_RETRIES = 3;
 const MAX_PAGES = 100;
-const API_VERSION = 'v24.0';
+export const API_VERSION = 'v25.0';
 
 export interface MetaRequestOptions {
   method?: string;

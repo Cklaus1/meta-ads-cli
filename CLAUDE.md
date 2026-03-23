@@ -1,145 +1,103 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-Meta Ads CLI is a standalone command-line tool for managing Facebook and Instagram advertising via the Meta Graph API.
+Meta Ads CLI is a standalone TypeScript CLI for managing Facebook/Instagram advertising via the Meta Graph API. 29 command groups, 150+ subcommands.
 
-**License:** CC-BY-NC-4.0 | **Node.js:** >=18 | **Framework:** Commander.js | **Language:** TypeScript
+**License:** CC-BY-NC-4.0 | **Node.js:** >=18 | **Framework:** Commander.js v11
 
 ## Development Commands
 
 ```bash
-# Install dependencies
-npm install
-
-# Build
-npm run build
-
-# Run in development mode (no build required)
-npm run dev -- --help
-
-# Run built CLI
-node dist/index.js --help
-
-# Link globally
-npm link
-meta-ads --help
+npm install                # Install dependencies
+npm run build              # Build with tsup → dist/index.js (ESM, shebang)
+npm run dev -- --help      # Run without building (tsx)
+node dist/index.js --help  # Run built CLI
+npm link && meta-ads --help  # Link globally
 ```
+
+There are no tests yet. When adding tests, use `vitest`.
 
 ## Architecture
 
-### CLI Framework
+### Entry Point & Initialization (`src/index.ts`)
 
-Uses `commander` v11 with lazy-initialized singletons and pre-action hooks for auth.
+- Commander program with lazy-initialized `AuthManager` and `MetaClient` singletons
+- `getAuth()` / `getClient()` factory functions passed to command registrars
+- `preAction` hook runs `auth.initialize()` before all commands except `auth`, `setup`, `schema`, `generate-skills`
+- Global flags: `--dry-run`, `--read-only`, `--api-version`
 
-**Entry point:** `src/index.ts`
+### Core Modules
 
-### Command Organization
+| File | Purpose |
+|------|---------|
+| `src/auth.ts` | OAuth2 flow on `localhost:8899`, token caching (keytar → file fallback at `~/.config/meta-ads-cli/token-cache.json`), long-lived token exchange |
+| `src/meta-client.ts` | Graph API HTTP client: `request()`, `requestAllPages()`, `uploadFile()`. Retry 3x with backoff on 429/5xx. Dry-run and read-only enforcement |
+| `src/formatter.ts` | `formatOutput(data, format)` — JSON, table, CSV, text, YAML. Auto-extracts from `data.data[]`. Flattens nested objects to dot-notation |
+| `src/errors.ts` | `handleErrors()` — wraps async actions, catches and prints user-friendly messages |
+| `src/validate.ts` | Path safety, control char rejection, `act_` prefix validation, numeric entity ID validation |
+| `src/logger.ts` | JSON logger singleton. Level via `META_ADS_CLI_LOG_LEVEL`, file via `META_ADS_CLI_LOG_FILE` (daily rotation) |
+| `src/mime.ts` | `detectMimeType(filename)` — extension-based MIME detection for uploads |
 
-Pattern: `meta-ads <service> <subcommand> [args] [options]`
+### Command Pattern
 
-**29 command groups, 110+ subcommands:**
+All 27 command files in `src/commands/` follow this pattern:
 
-Core CRUD:
-- `auth` — login, logout, status, setup
-- `accounts` — list, get
-- `campaigns` (alias: `camp`) — list, get, create, update, delete
-- `adsets` — list, get, create, update, delete
-- `ads` — list, get, create, update, delete
-- `creatives` — list, get, get-for-ad, create-image, create-video, update, upload-image, upload-video, save-image
-- `insights` — get, account, video
+```typescript
+export function registerXxxCommands(program: Command, getClient: () => MetaClient): void {
+  const svc = program.command('xxx').description('...');
+  svc.command('action')
+    .option('--account-id <id>', '...', getDefaultAccountId())
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      const client = getClient();
+      const response = await client.request('endpoint', { params: { fields: '...' } });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+}
+```
 
-Targeting & Audiences:
-- `targeting` — search-interests, suggest-interests, search-behaviors, search-demographics, search-geo, estimate-audience
-- `audiences` — list, get, create-custom, create-lookalike, update, overlap, delete
-- `retargeting` (alias: `retar`) — website-behavior, video-engagement, app-event, product, funnel, dynamic-campaign, frequency-optimization
-- `pixels` — list, create, events
-
-Pages, Leads & E-commerce:
-- `pages` — list, search
-- `leads` — forms, get, create-form, export, quality, webhooks
-- `catalog` — list, get, products, product-sets, create, create-product-set
-- `instagram` (alias: `ig`) — sync-catalog, create-shopping-ad, profile, shopping-insights
-
-Bidding & Budget:
-- `bidding` — validate, analyze, learning-phase, budget-schedule, seasonal-schedule, competitor-analysis, optimize-budget
-
-Operations:
-- `duplicate` (alias: `dup`) — campaign, adset, ad, creative
-- `bulk` — create-campaigns, update-status, analyze, upload-creatives
-
-Analytics & Intelligence:
-- `library` — search, page-ads
-- `analytics` — trends, creative-fatigue, competitive-intel, report
-- `ai` — score, anomalies, recommendations, export-dataset
-- `ab-test` — create, analyze
-
-Conversion Tracking & Monitoring:
-- `conversions` (alias: `conv`) — send-event, custom-conversions, create-custom, setup-tracking, validate-setup
-- `monitor` — check, auto-pause, dashboard
-
-Cross-service Workflows:
-- `workflow` (alias: `wf`) — campaign-health, full-audit, launch-campaign, duplicate-and-test
-
-Utilities:
-- `schema` — API introspection
-- `generate-skills` — Generate SKILL.md files for agents
-- `setup` — Interactive setup wizard
-
-### Authentication
-
-Priority chain:
-1. `META_ADS_CLI_ACCESS_TOKEN` env var
-2. `META_ACCESS_TOKEN` env var (alternate name)
-3. Cached OAuth token (keytar/file fallback)
-4. Interactive OAuth flow (`meta-ads auth login`)
-
-Token storage: OS keychain via keytar, fallback to `~/.config/meta-ads-cli/token-cache.json`
-
-### Key Patterns
-
-- **Lazy initialization:** AuthManager and MetaClient only created when needed
-- **Dependency injection:** Commands receive `getClient()` callback
-- **Error wrapper:** `handleErrors()` catches exceptions cleanly
-- **Pre-action hooks:** Ensure auth before API commands
-- **Multi-format output:** json, table, csv, text, yaml via `-o` flag
-- **Pagination:** `--all`, `--page-limit`, `--page-delay` flags
-- **Dry-run:** `--dry-run` shows API request without executing
-- **Read-only:** `--read-only` blocks POST/DELETE requests
-- **Default account:** `META_ADS_CLI_ACCOUNT_ID` env var for `--account-id`
-- **Input validation:** `src/validate.ts` for path safety, control chars, ID formats
-- **File upload:** `uploadFile()` in MetaClient for multipart image/video uploads
-- **MIME detection:** `src/mime.ts` for file type detection
-
-### Environment Variables
-
-- `META_ADS_CLI_APP_ID` — Meta App ID (required for OAuth)
-- `META_ADS_CLI_APP_SECRET` — Meta App Secret (for long-lived tokens)
-- `META_ADS_CLI_ACCESS_TOKEN` — Direct access token
-- `META_ADS_CLI_ACCOUNT_ID` — Default ad account ID
-- `META_ADS_CLI_API_VERSION` — Graph API version (default: v24.0)
-- `META_ADS_CLI_LOG_LEVEL` — Log level (debug, info, warn, error, none)
-- `META_ADS_CLI_LOG_FILE` — Log file path (daily rotation)
+Key conventions:
+- Every command action wrapped in `handleErrors()`
+- Every command with API output uses `formatOutput()` with `-o` flag (default: `json`)
+- `getDefaultAccountId()` reads `META_ADS_CLI_ACCOUNT_ID` env var
+- POST requests: `{ method: 'POST', body: { ... } }` (url-encoded by MetaClient)
+- Pagination: `--all`, `--page-limit`, `--page-delay` flags → `client.requestAllPages()`
+- Budget values are in **cents**, not dollars
 
 ### Adding a New Command
 
 1. Create `src/commands/<service>.ts`
 2. Export `registerXxxCommands(program, getClient)` function
-3. Use `handleErrors()` wrapper on all actions
-4. Use `formatOutput()` for output with `-o` flag support
+3. Wrap all actions in `handleErrors()`
+4. Use `formatOutput()` for output with `-o` flag
 5. Import and register in `src/index.ts`
 
-### Build
+### Authentication Priority Chain
 
-- `tsup` builds to `dist/index.js` (ESM, shebang banner)
-- `npm run dev` uses `tsx` for development
+1. `META_ADS_CLI_ACCESS_TOKEN` env var
+2. `META_ACCESS_TOKEN` env var (alternate)
+3. Cached OAuth token (keytar/file fallback)
+4. Interactive OAuth flow (`meta-ads auth login`)
 
-### Meta API
+### Environment Variables
 
-- Base URL: `https://graph.facebook.com/v24.0`
+| Variable | Purpose |
+|----------|---------|
+| `META_ADS_CLI_APP_ID` | Meta App ID (required for OAuth) |
+| `META_ADS_CLI_APP_SECRET` | Meta App Secret (for long-lived tokens) |
+| `META_ADS_CLI_ACCESS_TOKEN` | Direct access token (bypasses OAuth) |
+| `META_ADS_CLI_ACCOUNT_ID` | Default ad account ID for `--account-id` |
+| `META_ADS_CLI_API_VERSION` | Graph API version (default: v25.0) |
+| `META_ADS_CLI_LOG_LEVEL` | debug, info, warn, error, none |
+| `META_ADS_CLI_LOG_FILE` | Log file path (daily rotation) |
+
+### Meta Graph API
+
+- Base URL: `https://graph.facebook.com/v25.0`
 - Auth: `access_token` query parameter
-- POST uses `application/x-www-form-urlencoded`
+- POST body: `application/x-www-form-urlencoded`
 - Pagination: cursor-based via `paging.cursors.after`
 - Retry: 3 attempts with exponential backoff for 429/5xx

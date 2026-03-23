@@ -26,7 +26,7 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       }
       const client = getClient();
       const params: Record<string, string> = {
-        fields: 'id,name,campaign_id,status,daily_budget,lifetime_budget,targeting,bid_amount,bid_strategy,optimization_goal,billing_event,start_time,end_time,is_dynamic_creative',
+        fields: 'id,name,campaign_id,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,targeting,bid_amount,bid_strategy,optimization_goal,billing_event,start_time,end_time,is_dynamic_creative,learning_stage_info,issues_info,destination_type,promoted_object,created_time,updated_time',
         limit: opts.limit,
       };
       if (opts.status) {
@@ -55,7 +55,7 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
     .action(handleErrors(async (adsetId: string, opts) => {
       const client = getClient();
       const params: Record<string, string> = {
-        fields: 'id,name,campaign_id,status,daily_budget,lifetime_budget,targeting,bid_amount,bid_strategy,optimization_goal,billing_event,start_time,end_time,is_dynamic_creative,frequency_control_specs,promoted_object,destination_type',
+        fields: 'id,name,campaign_id,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,daily_min_spend_target,daily_spend_cap,lifetime_min_spend_target,lifetime_spend_cap,targeting,bid_amount,bid_strategy,bid_adjustments,bid_constraints,optimization_goal,billing_event,start_time,end_time,adset_schedule,is_dynamic_creative,frequency_control_specs,promoted_object,destination_type,attribution_spec,learning_stage_info,issues_info,pacing_type,adlabels,dsa_beneficiary,dsa_payor,brand_safety_config,source_adset_id,created_time,updated_time',
       };
 
       const response = await client.request(adsetId, { params });
@@ -68,18 +68,39 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
     .requiredOption('--campaign-id <id>', 'Campaign ID')
     .requiredOption('--name <name>', 'Ad set name')
-    .requiredOption('--optimization-goal <goal>', 'Optimization goal (LINK_CLICKS, REACH, CONVERSIONS, etc.)')
+    .requiredOption('--optimization-goal <goal>', 'Optimization goal (LINK_CLICKS, REACH, CONVERSIONS, VALUE, etc.)')
     .requiredOption('--billing-event <event>', 'Billing event (IMPRESSIONS, LINK_CLICKS, etc.)')
     .option('--status <status>', 'Initial status', 'PAUSED')
     .option('--daily-budget <cents>', 'Daily budget in cents')
     .option('--lifetime-budget <cents>', 'Lifetime budget in cents')
+    .option('--daily-min-spend-target <cents>', 'Minimum daily spend target in cents')
+    .option('--daily-spend-cap <cents>', 'Maximum daily spend cap in cents')
+    .option('--lifetime-min-spend-target <cents>', 'Minimum lifetime spend target in cents')
+    .option('--lifetime-spend-cap <cents>', 'Maximum lifetime spend cap in cents')
     .option('--bid-amount <cents>', 'Bid amount in cents')
-    .option('--bid-strategy <strategy>', 'Bid strategy')
+    .option('--bid-strategy <strategy>', 'Bid strategy (LOWEST_COST_WITHOUT_CAP, LOWEST_COST_WITH_BID_CAP, COST_CAP, LOWEST_COST_WITH_MIN_ROAS)')
     .option('--targeting <json>', 'Targeting spec as JSON string')
+    .option('--targeting-automation <json>', 'Targeting automation config as JSON (v25: age/gender as suggestions)')
     .option('--start-time <time>', 'Start time (ISO 8601)')
     .option('--end-time <time>', 'End time (ISO 8601)')
+    .option('--adset-schedule <json>', 'Dayparting schedule as JSON array')
     .option('--promoted-object <json>', 'Promoted object as JSON string')
+    .option('--destination-type <type>', 'Destination type (WEBSITE, APP, MESSENGER, INSTAGRAM_DIRECT, WHATSAPP, etc.)')
+    .option('--attribution-spec <json>', 'Attribution spec as JSON (e.g., [{"event_type":"CLICK_THROUGH","window_days":7}])')
     .option('--dynamic-creative', 'Enable dynamic creative')
+    .option('--frequency-control-specs <json>', 'Frequency capping as JSON array')
+    .option('--publisher-platforms <platforms>', 'Comma-separated publisher platforms (facebook,instagram,threads,messenger,audience_network,whatsapp)')
+    .option('--facebook-positions <positions>', 'Comma-separated Facebook positions (feed,story,reels,marketplace,video_feeds,instream_video,search,right_hand_column,profile_feed)')
+    .option('--instagram-positions <positions>', 'Comma-separated Instagram positions (stream,story,explore,reels,explore_home,profile_feed,ig_search,profile_reels)')
+    .option('--threads-positions <positions>', 'Comma-separated Threads positions (threads_stream)')
+    .option('--messenger-positions <positions>', 'Comma-separated Messenger positions (sponsored_messages,story)')
+    .option('--whatsapp-positions <positions>', 'Comma-separated WhatsApp positions (status)')
+    .option('--audience-network-positions <positions>', 'Comma-separated Audience Network positions (classic,rewarded_video)')
+    .option('--device-platforms <platforms>', 'Comma-separated device platforms (mobile,desktop)')
+    .option('--pacing-type <type>', 'Pacing type (standard, no_pacing)')
+    .option('--dsa-beneficiary <name>', 'EU/DSA ad beneficiary')
+    .option('--dsa-payor <name>', 'EU/DSA ad payor')
+    .option('--adlabels <json>', 'Ad labels as JSON array')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) {
@@ -96,13 +117,37 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
 
       if (opts.dailyBudget) body.daily_budget = opts.dailyBudget;
       if (opts.lifetimeBudget) body.lifetime_budget = opts.lifetimeBudget;
+      if (opts.dailyMinSpendTarget) body.daily_min_spend_target = opts.dailyMinSpendTarget;
+      if (opts.dailySpendCap) body.daily_spend_cap = opts.dailySpendCap;
+      if (opts.lifetimeMinSpendTarget) body.lifetime_min_spend_target = opts.lifetimeMinSpendTarget;
+      if (opts.lifetimeSpendCap) body.lifetime_spend_cap = opts.lifetimeSpendCap;
       if (opts.bidAmount) body.bid_amount = opts.bidAmount;
       if (opts.bidStrategy) body.bid_strategy = opts.bidStrategy;
-      if (opts.targeting) body.targeting = opts.targeting;
+      if (opts.targetingAutomation) body.targeting_automation = opts.targetingAutomation;
       if (opts.startTime) body.start_time = opts.startTime;
       if (opts.endTime) body.end_time = opts.endTime;
+      if (opts.adsetSchedule) body.adset_schedule = opts.adsetSchedule;
       if (opts.promotedObject) body.promoted_object = opts.promotedObject;
+      if (opts.destinationType) body.destination_type = opts.destinationType;
+      if (opts.attributionSpec) body.attribution_spec = opts.attributionSpec;
       if (opts.dynamicCreative) body.is_dynamic_creative = 'true';
+      if (opts.frequencyControlSpecs) body.frequency_control_specs = opts.frequencyControlSpecs;
+      if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
+      if (opts.dsaBeneficiary) body.dsa_beneficiary = opts.dsaBeneficiary;
+      if (opts.dsaPayor) body.dsa_payor = opts.dsaPayor;
+      if (opts.adlabels) body.adlabels = opts.adlabels;
+
+      // Build targeting with placement controls
+      const targeting = opts.targeting ? JSON.parse(opts.targeting) : {};
+      if (opts.publisherPlatforms) targeting.publisher_platforms = opts.publisherPlatforms.split(',');
+      if (opts.facebookPositions) targeting.facebook_positions = opts.facebookPositions.split(',');
+      if (opts.instagramPositions) targeting.instagram_positions = opts.instagramPositions.split(',');
+      if (opts.threadsPositions) targeting.threads_positions = opts.threadsPositions.split(',');
+      if (opts.messengerPositions) targeting.messenger_positions = opts.messengerPositions.split(',');
+      if (opts.whatsappPositions) targeting.whatsapp_positions = opts.whatsappPositions.split(',');
+      if (opts.audienceNetworkPositions) targeting.audience_network_positions = opts.audienceNetworkPositions.split(',');
+      if (opts.devicePlatforms) targeting.device_platforms = opts.devicePlatforms.split(',');
+      if (Object.keys(targeting).length > 0) body.targeting = JSON.stringify(targeting);
 
       const response = await client.request(`${opts.accountId}/adsets`, {
         method: 'POST',
@@ -119,10 +164,31 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
     .option('--status <status>', 'New status (ACTIVE, PAUSED, ARCHIVED)')
     .option('--daily-budget <cents>', 'New daily budget in cents')
     .option('--lifetime-budget <cents>', 'New lifetime budget in cents')
+    .option('--daily-min-spend-target <cents>', 'Minimum daily spend target in cents')
+    .option('--daily-spend-cap <cents>', 'Maximum daily spend cap in cents')
+    .option('--lifetime-min-spend-target <cents>', 'Minimum lifetime spend target in cents')
+    .option('--lifetime-spend-cap <cents>', 'Maximum lifetime spend cap in cents')
     .option('--bid-amount <cents>', 'New bid amount in cents')
     .option('--bid-strategy <strategy>', 'New bid strategy')
     .option('--targeting <json>', 'New targeting spec as JSON string')
+    .option('--targeting-automation <json>', 'Targeting automation config as JSON')
     .option('--optimization-goal <goal>', 'New optimization goal')
+    .option('--start-time <time>', 'New start time (ISO 8601)')
+    .option('--end-time <time>', 'New end time (ISO 8601)')
+    .option('--adset-schedule <json>', 'Dayparting schedule as JSON array')
+    .option('--attribution-spec <json>', 'Attribution spec as JSON')
+    .option('--publisher-platforms <platforms>', 'Comma-separated publisher platforms (facebook,instagram,threads,messenger,audience_network,whatsapp)')
+    .option('--facebook-positions <positions>', 'Comma-separated Facebook positions')
+    .option('--instagram-positions <positions>', 'Comma-separated Instagram positions')
+    .option('--threads-positions <positions>', 'Comma-separated Threads positions')
+    .option('--messenger-positions <positions>', 'Comma-separated Messenger positions')
+    .option('--whatsapp-positions <positions>', 'Comma-separated WhatsApp positions')
+    .option('--audience-network-positions <positions>', 'Comma-separated Audience Network positions')
+    .option('--device-platforms <platforms>', 'Comma-separated device platforms (mobile,desktop)')
+    .option('--pacing-type <type>', 'Pacing type (standard, no_pacing)')
+    .option('--dsa-beneficiary <name>', 'EU/DSA ad beneficiary')
+    .option('--dsa-payor <name>', 'EU/DSA ad payor')
+    .option('--adlabels <json>', 'Ad labels as JSON array')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (adsetId: string, opts) => {
       const client = getClient();
@@ -132,10 +198,35 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       if (opts.status) body.status = opts.status;
       if (opts.dailyBudget) body.daily_budget = opts.dailyBudget;
       if (opts.lifetimeBudget) body.lifetime_budget = opts.lifetimeBudget;
+      if (opts.dailyMinSpendTarget) body.daily_min_spend_target = opts.dailyMinSpendTarget;
+      if (opts.dailySpendCap) body.daily_spend_cap = opts.dailySpendCap;
+      if (opts.lifetimeMinSpendTarget) body.lifetime_min_spend_target = opts.lifetimeMinSpendTarget;
+      if (opts.lifetimeSpendCap) body.lifetime_spend_cap = opts.lifetimeSpendCap;
       if (opts.bidAmount) body.bid_amount = opts.bidAmount;
       if (opts.bidStrategy) body.bid_strategy = opts.bidStrategy;
-      if (opts.targeting) body.targeting = opts.targeting;
+      if (opts.targetingAutomation) body.targeting_automation = opts.targetingAutomation;
       if (opts.optimizationGoal) body.optimization_goal = opts.optimizationGoal;
+      if (opts.startTime) body.start_time = opts.startTime;
+      if (opts.endTime) body.end_time = opts.endTime;
+      if (opts.adsetSchedule) body.adset_schedule = opts.adsetSchedule;
+
+      // Build targeting with placement controls
+      const targeting = opts.targeting ? JSON.parse(opts.targeting) : {};
+      let hasPlacement = false;
+      if (opts.publisherPlatforms) { targeting.publisher_platforms = opts.publisherPlatforms.split(','); hasPlacement = true; }
+      if (opts.facebookPositions) { targeting.facebook_positions = opts.facebookPositions.split(','); hasPlacement = true; }
+      if (opts.instagramPositions) { targeting.instagram_positions = opts.instagramPositions.split(','); hasPlacement = true; }
+      if (opts.threadsPositions) { targeting.threads_positions = opts.threadsPositions.split(','); hasPlacement = true; }
+      if (opts.messengerPositions) { targeting.messenger_positions = opts.messengerPositions.split(','); hasPlacement = true; }
+      if (opts.whatsappPositions) { targeting.whatsapp_positions = opts.whatsappPositions.split(','); hasPlacement = true; }
+      if (opts.audienceNetworkPositions) { targeting.audience_network_positions = opts.audienceNetworkPositions.split(','); hasPlacement = true; }
+      if (opts.devicePlatforms) { targeting.device_platforms = opts.devicePlatforms.split(','); hasPlacement = true; }
+      if (opts.targeting || hasPlacement) body.targeting = JSON.stringify(targeting);
+      if (opts.attributionSpec) body.attribution_spec = opts.attributionSpec;
+      if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
+      if (opts.dsaBeneficiary) body.dsa_beneficiary = opts.dsaBeneficiary;
+      if (opts.dsaPayor) body.dsa_payor = opts.dsaPayor;
+      if (opts.adlabels) body.adlabels = opts.adlabels;
 
       if (Object.keys(body).length === 0) {
         throw new Error('No update parameters provided');

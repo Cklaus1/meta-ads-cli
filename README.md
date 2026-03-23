@@ -95,7 +95,7 @@ Token storage: OS keychain via `keytar`, fallback to `~/.config/meta-ads-cli/tok
 |------|-------------|
 | `--dry-run` | Preview API requests without executing |
 | `--read-only` | Block all POST/DELETE requests |
-| `--api-version <version>` | Graph API version (default: `v24.0`) |
+| `--api-version <version>` | Graph API version (default: `v25.0`) |
 | `-V, --version` | Show CLI version |
 
 ## Output Formats
@@ -209,7 +209,7 @@ Preview any API request without executing it:
 
 ```bash
 meta-ads campaigns create --account-id act_123 --name "Test" --objective OUTCOME_TRAFFIC --dry-run
-# [dry-run] POST https://graph.facebook.com/v24.0/act_123/campaigns
+# [dry-run] POST https://graph.facebook.com/v25.0/act_123/campaigns
 # [dry-run] Body: {"name":"Test","objective":"OUTCOME_TRAFFIC",...}
 ```
 
@@ -244,7 +244,7 @@ meta-ads workflow duplicate-and-test 12345 --variant-strategy COST_CAP
 | `META_ADS_CLI_APP_SECRET` | Meta App Secret | For long-lived tokens |
 | `META_ADS_CLI_ACCESS_TOKEN` | Direct access token | Alternative to OAuth |
 | `META_ADS_CLI_ACCOUNT_ID` | Default ad account ID | Optional |
-| `META_ADS_CLI_API_VERSION` | Graph API version | Optional (default: v24.0) |
+| `META_ADS_CLI_API_VERSION` | Graph API version | Optional (default: v25.0) |
 | `META_ADS_CLI_LOG_LEVEL` | Log level (debug/info/warn/error/none) | Optional |
 | `META_ADS_CLI_LOG_FILE` | Log file path (daily rotation) | Optional |
 

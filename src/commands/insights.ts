@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { resolveTimeRange } from '../time-range.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -27,7 +28,7 @@ export function registerInsightCommands(program: Command, getClient: () => MetaC
     .action(handleErrors(async (objectId: string, opts) => {
       const client = getClient();
 
-      const defaultFields = 'impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,conversions,cost_per_action_type,date_start,date_stop';
+      const defaultFields = 'impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,conversions,cost_per_action_type,purchase_roas,website_purchase_roas,date_start,date_stop';
       const params: Record<string, string> = {
         fields: opts.fields || defaultFields,
         limit: opts.limit,
@@ -41,45 +42,8 @@ export function registerInsightCommands(program: Command, getClient: () => MetaC
           until: opts.dateEnd,
         });
       } else {
-        const rangeMap: Record<string, { since: string; until: string }> = {};
-        const now = new Date();
-        const fmt = (d: Date) => d.toISOString().slice(0, 10);
-
-        const yesterday = new Date(now);
-        yesterday.setDate(yesterday.getDate() - 1);
-
-        const ranges: Record<string, () => { since: string; until: string }> = {
-          today: () => ({ since: fmt(now), until: fmt(now) }),
-          yesterday: () => ({ since: fmt(yesterday), until: fmt(yesterday) }),
-          last_7d: () => {
-            const d = new Date(now);
-            d.setDate(d.getDate() - 7);
-            return { since: fmt(d), until: fmt(now) };
-          },
-          last_30d: () => {
-            const d = new Date(now);
-            d.setDate(d.getDate() - 30);
-            return { since: fmt(d), until: fmt(now) };
-          },
-          last_90d: () => {
-            const d = new Date(now);
-            d.setDate(d.getDate() - 90);
-            return { since: fmt(d), until: fmt(now) };
-          },
-          this_month: () => {
-            const start = new Date(now.getFullYear(), now.getMonth(), 1);
-            return { since: fmt(start), until: fmt(now) };
-          },
-          last_month: () => {
-            const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-            const end = new Date(now.getFullYear(), now.getMonth(), 0);
-            return { since: fmt(start), until: fmt(end) };
-          },
-        };
-
-        if (opts.timeRange !== 'maximum' && ranges[opts.timeRange]) {
-          params.time_range = JSON.stringify(ranges[opts.timeRange]());
-        }
+        const resolved = resolveTimeRange(opts.timeRange);
+        if (resolved) params.time_range = resolved;
       }
 
       if (opts.breakdown) {
@@ -109,12 +73,15 @@ export function registerInsightCommands(program: Command, getClient: () => MetaC
       if (!opts.accountId) {
         throw new Error('Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
       }
-      // Delegate to the get command internally
       const client = getClient();
       const params: Record<string, string> = {
-        fields: 'impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,date_start,date_stop',
+        fields: 'impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,conversions,cost_per_action_type,purchase_roas,date_start,date_stop',
         level: 'account',
       };
+
+      const resolved = resolveTimeRange(opts.timeRange);
+      if (resolved) params.time_range = resolved;
+
       if (opts.breakdown) {
         params.breakdowns = opts.breakdown;
       }
@@ -133,6 +100,9 @@ export function registerInsightCommands(program: Command, getClient: () => MetaC
       const params: Record<string, string> = {
         fields: 'video_play_actions,video_p25_watched_actions,video_p50_watched_actions,video_p75_watched_actions,video_p100_watched_actions,video_avg_time_watched_actions,video_thruplay_watched_actions,impressions,reach,spend',
       };
+
+      const resolved = resolveTimeRange(opts.timeRange);
+      if (resolved) params.time_range = resolved;
 
       const response = await client.request(`${adId}/insights`, { params });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
