@@ -29,6 +29,12 @@ import { registerWorkflowCommands } from './commands/workflows.js';
 import { registerSchemaCommands } from './commands/schema.js';
 import { registerGenerateSkillsCommand } from './commands/generate-skills.js';
 import { registerThreadsCommands } from './commands/threads.js';
+import { registerBusinessCommands } from './commands/business.js';
+import { registerWhatsAppCommands } from './commands/whatsapp.js';
+import { registerMessengerCommands } from './commands/messenger.js';
+import { registerReachFrequencyCommands } from './commands/reach-frequency.js';
+import { registerBrandedContentCommands } from './commands/branded-content.js';
+import { registerWebhookCommands } from './commands/webhooks.js';
 import { registerSetupCommand } from './commands/setup.js';
 import { registerProfileCommands } from './commands/profile.js';
 import { applyProfile } from './profiles.js';
@@ -128,6 +134,20 @@ registerWorkflowCommands(program, getClient);
 
 // Threads (content publishing & insights)
 registerThreadsCommands(program, getClient);
+
+// Business Management
+registerBusinessCommands(program, getClient);
+
+// Messaging platforms
+registerWhatsAppCommands(program, getClient);
+registerMessengerCommands(program, getClient);
+
+// Media planning & creator partnerships
+registerReachFrequencyCommands(program, getClient);
+registerBrandedContentCommands(program, getClient);
+
+// Webhooks
+registerWebhookCommands(program, getClient);
 
 // Profiles & Utilities
 registerProfileCommands(program);

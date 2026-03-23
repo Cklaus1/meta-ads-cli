@@ -424,4 +424,39 @@ export function registerCatalogCommands(program: Command, getClient: () => MetaC
         products: productsResponse.data,
       }, opts.output as OutputFormat));
     }));
+
+  // ── Catalog Batch API ─────────────────────────────────
+
+  catalog
+    .command('batch <catalogId>')
+    .description('Bulk create/update/delete products via batch API (up to 30MB)')
+    .requiredOption('--requests <json>', 'JSON array of batch requests: [{method, retailer_id, data: {...}}, ...]')
+    .option('--allow-upsert', 'Allow updates alongside creation')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (catalogId: string, opts) => {
+      const client = getClient();
+      const body: Record<string, string> = {
+        requests: opts.requests,
+      };
+      if (opts.allowUpsert) body.allow_upsert = 'true';
+
+      const response = await client.request(`${catalogId}/items_batch`, {
+        method: 'POST',
+        body,
+      });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  catalog
+    .command('batch-status <catalogId>')
+    .description('Check status of a batch upload')
+    .requiredOption('--handle <handle>', 'Batch handle from batch upload response')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (catalogId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(`${catalogId}/check_batch_request_status`, {
+        params: { handle: opts.handle },
+      });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
 }

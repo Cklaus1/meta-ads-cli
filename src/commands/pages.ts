@@ -266,4 +266,109 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
       const response = await client.request(`${postId}/insights`, { params });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
+
+  // ── Video & Live ──────────────────────────────────────
+
+  pages
+    .command('videos <pageId>')
+    .description('List videos for a page')
+    .option('--limit <n>', 'Maximum videos', '25')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pageId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(`${pageId}/videos`, {
+        params: { fields: 'id,title,description,length,created_time,updated_time,permalink_url,views,likes.summary(true)', limit: opts.limit },
+      });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  pages
+    .command('upload-video <pageId>')
+    .description('Upload a video to a page')
+    .requiredOption('--file <path>', 'Local video file path')
+    .option('--title <title>', 'Video title')
+    .option('--description <text>', 'Video description')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pageId: string, opts) => {
+      const client = getClient();
+      const response = await client.uploadFile(`${pageId}/videos`, opts.file);
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  pages
+    .command('live-videos <pageId>')
+    .description('List live videos for a page')
+    .option('--limit <n>', 'Maximum videos', '10')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pageId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(`${pageId}/live_videos`, {
+        params: { fields: 'id,title,description,status,live_views,permalink_url,creation_time,video', limit: opts.limit },
+      });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  pages
+    .command('create-live <pageId>')
+    .description('Create a live video broadcast')
+    .option('--title <title>', 'Broadcast title')
+    .option('--description <text>', 'Broadcast description')
+    .option('--status <status>', 'Status: LIVE_NOW, SCHEDULED_UNPUBLISHED', 'LIVE_NOW')
+    .option('--scheduled-time <timestamp>', 'Unix timestamp for scheduled broadcast')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pageId: string, opts) => {
+      const client = getClient();
+      const body: Record<string, string> = {
+        status: opts.status,
+      };
+      if (opts.title) body.title = opts.title;
+      if (opts.description) body.description = opts.description;
+      if (opts.scheduledTime) {
+        body.planned_start_time = opts.scheduledTime;
+        body.status = 'SCHEDULED_UNPUBLISHED';
+      }
+
+      const response = await client.request(`${pageId}/live_videos`, { method: 'POST', body });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  // ── Events ────────────────────────────────────────────
+
+  pages
+    .command('events <pageId>')
+    .description('List events for a page')
+    .option('--limit <n>', 'Maximum events', '25')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pageId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(`${pageId}/events`, {
+        params: { fields: 'id,name,description,start_time,end_time,place,cover,attending_count,interested_count,is_online', limit: opts.limit },
+      });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  pages
+    .command('create-event <pageId>')
+    .description('Create a page event')
+    .requiredOption('--name <name>', 'Event name')
+    .requiredOption('--start-time <time>', 'Start time (ISO 8601)')
+    .option('--end-time <time>', 'End time (ISO 8601)')
+    .option('--description <text>', 'Event description')
+    .option('--location <place>', 'Event location name')
+    .option('--is-online', 'Mark as online event')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pageId: string, opts) => {
+      const client = getClient();
+      const body: Record<string, string> = {
+        name: opts.name,
+        start_time: opts.startTime,
+      };
+      if (opts.endTime) body.end_time = opts.endTime;
+      if (opts.description) body.description = opts.description;
+      if (opts.location) body.location = opts.location;
+      if (opts.isOnline) body.is_online = 'true';
+
+      const response = await client.request(`${pageId}/events`, { method: 'POST', body });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
 }

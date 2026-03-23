@@ -242,4 +242,65 @@ export function registerConversionCommands(program: Command, getClient: () => Me
 
       console.log(formatOutput(result, opts.output as OutputFormat));
     }));
+
+  // ── App Events API ────────────────────────────────────
+
+  conversions
+    .command('send-app-event')
+    .description('Log an app event for analytics and ad optimization')
+    .requiredOption('--app-id <id>', 'Meta App ID')
+    .requiredOption('--event-name <name>', 'Event name (fb_mobile_purchase, fb_mobile_add_to_cart, etc.)')
+    .option('--advertiser-id <id>', 'Advertiser tracking ID (IDFA/GAID)')
+    .option('--bundle-id <id>', 'App bundle identifier')
+    .option('--custom-events <json>', 'Custom event data as JSON')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      const client = getClient();
+      const eventData: Record<string, unknown> = {
+        event: 'CUSTOM_APP_EVENTS',
+        custom_events: JSON.stringify([{ _eventName: opts.eventName }]),
+      };
+      if (opts.advertiserId) eventData.advertiser_id = opts.advertiserId;
+      if (opts.bundleId) eventData.application_tracking_enabled = '1';
+      if (opts.customEvents) eventData.custom_events = opts.customEvents;
+
+      const body: Record<string, string> = {};
+      for (const [k, v] of Object.entries(eventData)) body[k] = String(v);
+
+      const response = await client.request(`${opts.appId}/activities`, { method: 'POST', body });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  // ── Dataset API (unified event sources) ───────────────
+
+  conversions
+    .command('datasets')
+    .description('List datasets (unified event sources) for an account')
+    .option('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      if (!opts.accountId) throw new Error('Account ID required');
+      const client = getClient();
+      const response = await client.request(`${opts.accountId}/datasets`, {
+        params: { fields: 'id,name,description,creation_time,usage' },
+      });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  conversions
+    .command('dataset-send <datasetId>')
+    .description('Send events to a dataset (unified Conversions API)')
+    .requiredOption('--events <json>', 'JSON array of event objects')
+    .option('--test-event-code <code>', 'Test event code')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (datasetId: string, opts) => {
+      const client = getClient();
+      const body: Record<string, string> = {
+        data: opts.events,
+      };
+      if (opts.testEventCode) body.test_event_code = opts.testEventCode;
+
+      const response = await client.request(`${datasetId}/events`, { method: 'POST', body });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
 }

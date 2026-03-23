@@ -45,4 +45,29 @@ export function registerAccountCommands(program: Command, getClient: () => MetaC
       const response = await client.request(id, { params });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
+
+  accounts
+    .command('activity <accountId>')
+    .description('Get activity log (audit trail) for an ad account')
+    .option('--limit <n>', 'Maximum entries', '25')
+    .option('--since <timestamp>', 'Start Unix timestamp')
+    .option('--until <timestamp>', 'End Unix timestamp')
+    .option('--all', 'Fetch all pages')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (accountId: string, opts) => {
+      const client = getClient();
+      const id = accountId.startsWith('act_') ? accountId : `act_${accountId}`;
+      const params: Record<string, string> = {
+        fields: 'actor_id,actor_name,event_type,event_time,extra_data,object_id,object_name,translated_event_type',
+        limit: opts.limit,
+      };
+      if (opts.since) params.since = opts.since;
+      if (opts.until) params.until = opts.until;
+
+      const endpoint = `${id}/activities`;
+      const response = opts.all
+        ? await client.requestAllPages(endpoint, { params })
+        : await client.request(endpoint, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
 }
