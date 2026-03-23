@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Meta Ads CLI is a standalone TypeScript CLI for managing Facebook, Instagram, Threads & WhatsApp advertising via the Meta Graph API. 30 command groups, 170+ subcommands.
+Meta Ads CLI is a standalone TypeScript CLI for managing Facebook, Instagram, Threads & WhatsApp advertising via the Meta Graph API. 31 command groups, 180+ subcommands.
 
 **License:** CC-BY-NC-4.0 | **Node.js:** >=18 | **Framework:** Commander.js v11
 
@@ -33,7 +33,8 @@ npm run test:watch         # Watch mode
 - Commander program with lazy-initialized `AuthManager` and `MetaClient` singletons
 - `getAuth()` / `getClient()` factory functions passed to command registrars
 - `preAction` hook runs `auth.initialize()` before all commands except `auth`, `setup`, `schema`, `generate-skills`
-- Global flags: `--dry-run`, `--read-only`, `--api-version`
+- Global flags: `--dry-run`, `--read-only`, `--api-version`, `--profile`
+- `--profile <name>` applies named profile credentials before command execution
 
 ### Core Modules
 
@@ -46,10 +47,12 @@ npm run test:watch         # Watch mode
 | `src/validate.ts` | Path safety, control char rejection, `act_` prefix validation, numeric entity ID validation |
 | `src/logger.ts` | JSON logger singleton. Level via `META_ADS_CLI_LOG_LEVEL`, file via `META_ADS_CLI_LOG_FILE` (daily rotation) |
 | `src/mime.ts` | `detectMimeType(filename)` — extension-based MIME detection for uploads |
+| `src/time-range.ts` | `resolveTimeRange()` — shared named time range resolution (last_7d, etc.) |
+| `src/profiles.ts` | Named profile management for multi-account config (`~/.config/meta-ads-cli/profiles.json`) |
 
 ### Command Pattern
 
-All 28 command files in `src/commands/` follow this pattern:
+All 29 command files in `src/commands/` follow this pattern:
 
 ```typescript
 export function registerXxxCommands(program: Command, getClient: () => MetaClient): void {

@@ -4,7 +4,7 @@ Guidelines for AI agents working on the meta-ads-cli codebase.
 
 ## Project Overview
 
-Meta Ads CLI is a TypeScript CLI wrapping the Meta Graph API (v25.0) for Facebook, Instagram, Threads & WhatsApp advertising. 30 command groups, 170+ subcommands covering campaigns, ad sets, ads, creatives, audiences, insights, pages, threads, bidding, retargeting, conversions, and more.
+Meta Ads CLI is a TypeScript CLI wrapping the Meta Graph API (v25.0) for Facebook, Instagram, Threads & WhatsApp advertising. 31 command groups, 180+ subcommands covering campaigns, ad sets, ads, creatives, audiences, insights, pages, Instagram publishing, threads, profiles, bidding, retargeting, conversions, and more.
 
 > [!IMPORTANT]
 > All commands are statically defined in `src/commands/*.ts`. Adding a new command means adding code.
@@ -33,7 +33,8 @@ npm run dev -- --help  # Run without building (tsx)
 | `src/validate.ts` | Input validation: safe paths, control chars, account/entity ID formats |
 | `src/mime.ts` | MIME type detection for file uploads (40+ types) |
 | `src/time-range.ts` | Shared `resolveTimeRange()` for named time ranges (last_7d, etc.) |
-| `src/commands/*.ts` | 28 command modules, each exporting `registerXxxCommands()` |
+| `src/profiles.ts` | Named profile management for multi-account config |
+| `src/commands/*.ts` | 29 command modules, each exporting `registerXxxCommands()` |
 
 ## Adding a New Command
 

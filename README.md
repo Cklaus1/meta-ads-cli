@@ -2,7 +2,7 @@
 
 A standalone command-line tool for managing Facebook, Instagram, Threads & WhatsApp advertising via the Meta Graph API. Built for both humans and AI agents.
 
-**30 command groups | 170+ subcommands | Graph API v25.0 | Full Meta platform coverage**
+**31 command groups | 180+ subcommands | Graph API v25.0 | Full Meta platform coverage**
 
 ## Features
 
@@ -16,9 +16,10 @@ A standalone command-line tool for managing Facebook, Instagram, Threads & Whats
 - **Conversion tracking** — Conversions API (server-side events, batch, offline), pixels, custom conversions
 - **E-commerce** — Product catalogs (full CRUD), feeds, dynamic ads, collection ads, Instagram Shopping
 - **Pages management** — Posts, comments, replies, page insights, post insights
-- **Instagram management** — Media, stories, reels insights, comments, account metrics
+- **Instagram publishing** — Publish photos, Reels, carousels, stories + media insights, comments
 - **Threads** — Post, reply, search, insights, conversation threads
 - **Lead generation** — Forms CRUD, lead export, quality analysis, webhooks
+- **Multi-account profiles** — Named profiles for managing multiple clients/accounts
 - **Bidding & budget** — Strategy validation, automated adjustments, seasonal scheduling
 - **Creative management** — Clone with overrides, upload image/video, carousel support
 - **Bulk operations** — Batch campaign creation, status updates, parallel analysis
@@ -109,6 +110,7 @@ Token storage: OS keychain via `keytar`, fallback to `~/.config/meta-ads-cli/tok
 | `--dry-run` | Preview API requests without executing |
 | `--read-only` | Block all POST/DELETE requests |
 | `--api-version <version>` | Graph API version (default: `v25.0`) |
+| `--profile <name>` | Use a named profile for credentials and account |
 | `-V, --version` | Show CLI version |
 
 ## Output Formats
@@ -157,7 +159,7 @@ meta-ads insights get 12345 -o csv > report.csv
 |---------|-------------|-------------|
 | `pages` | list, get, search, posts, create-post, update-post, delete-post, comments, reply, delete-comment, insights, post-insights | Facebook Page management |
 | `threads` | profile, create, list, get, replies, conversation, delete, hide-reply, insights, post-insights, search | Threads publishing & insights |
-| `instagram` | sync-catalog, create-shopping-ad, profile, media, media-get, media-insights, stories, story-insights, comments, reply-comment, delete-comment, insights, shopping-insights | Instagram management |
+| `instagram` | publish, publish-carousel, publish-story, profile, media, media-get, media-insights, stories, story-insights, comments, reply-comment, delete-comment, insights, shopping-insights, sync-catalog, create-shopping-ad | Instagram publishing & management |
 
 ### Leads & E-commerce
 
@@ -200,9 +202,90 @@ meta-ads insights get 12345 -o csv > report.csv
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
 | `workflow` | campaign-health, full-audit, launch-campaign, duplicate-and-test | Multi-step workflows |
+| `profile` | list, get, create, delete, use | Named profiles for multi-account management |
 | `schema` | (service) (operation) | API endpoint introspection |
 | `generate-skills` | | Generate SKILL.md files for AI agents |
 | `setup` | | Interactive configuration wizard |
+
+## Profiles (Multi-Account)
+
+Manage multiple Meta accounts with named profiles:
+
+```bash
+# Create profiles for different clients
+meta-ads profile create --name buildify --access-token EAAJ... --account-id act_698886266210181
+meta-ads profile create --name kava --access-token EAAX... --account-id act_1964457533866685
+
+# Use with any command via --profile flag
+meta-ads --profile buildify campaigns list
+meta-ads --profile kava insights account --time-range last_7d
+
+# List all profiles (tokens masked)
+meta-ads profile list -o table
+
+# Show export commands for shell usage
+meta-ads profile use buildify
+# export META_ADS_CLI_ACCESS_TOKEN="EAAJ..."
+# export META_ADS_CLI_ACCOUNT_ID="act_698886266210181"
+```
+
+Profiles stored in `~/.config/meta-ads-cli/profiles.json`.
+
+## Organic Publishing
+
+### Facebook Pages
+
+```bash
+# Create a text post
+meta-ads pages create-post 643329395521111 --message "Hello from the CLI!"
+
+# Share a link with text
+meta-ads pages create-post 643329395521111 --message "Check this out" --link https://buildify.dev
+
+# Schedule a post (Unix timestamp)
+meta-ads pages create-post 643329395521111 --message "Coming soon" --scheduled-time 1711900800
+
+# List and manage posts
+meta-ads pages posts 643329395521111 --limit 10
+meta-ads pages comments 12345_67890
+meta-ads pages reply 11111 --message "Thanks!"
+```
+
+### Instagram
+
+```bash
+# Publish a photo post
+meta-ads ig publish 17841473456331621 --image-url https://example.com/photo.jpg --caption "New post!"
+
+# Publish a Reel (video)
+meta-ads ig publish 17841473456331621 --video-url https://example.com/reel.mp4 --caption "Check this out"
+
+# Publish a carousel (2-10 items)
+meta-ads ig publish-carousel 17841473456331621 \
+  --items '[{"image_url":"https://example.com/1.jpg"},{"image_url":"https://example.com/2.jpg"}]' \
+  --caption "Swipe through!"
+
+# Publish a story
+meta-ads ig publish-story 17841473456331621 --image-url https://example.com/story.jpg
+```
+
+### Threads
+
+```bash
+# Post to Threads
+meta-ads threads create --text "Hello Threads!"
+
+# Post with image
+meta-ads threads create --text "Check this out" --image-url https://example.com/image.jpg
+
+# Reply to a thread
+meta-ads threads create --text "Great point!" --reply-to 12345
+
+# Search and explore
+meta-ads threads search "buildify"
+meta-ads threads replies 12345
+meta-ads threads conversation 12345
+```
 
 ## Placement Targeting
 
