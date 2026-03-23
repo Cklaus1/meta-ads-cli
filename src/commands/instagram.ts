@@ -109,6 +109,184 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
       }
     }));
 
+  // ── Content Publishing ─────────────────────────────────
+
+  instagram
+    .command('publish <instagramId>')
+    .description('Publish a photo or video post to Instagram')
+    .option('--image-url <url>', 'Public image URL to publish')
+    .option('--video-url <url>', 'Public video URL to publish (Reels)')
+    .option('--caption <text>', 'Post caption')
+    .option('--location-id <id>', 'Facebook Page location ID')
+    .option('--user-tags <json>', 'User tags as JSON array [{username, x, y}]')
+    .option('--cover-url <url>', 'Cover image URL for Reels')
+    .option('--share-to-feed', 'Share Reel to feed (default: true)')
+    .option('--collaborators <usernames>', 'Comma-separated collaborator usernames')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (instagramId: string, opts) => {
+      if (!opts.imageUrl && !opts.videoUrl) {
+        throw new Error('Either --image-url or --video-url is required');
+      }
+      const client = getClient();
+
+      // Step 1: Create media container
+      const containerBody: Record<string, string> = {};
+      if (opts.imageUrl) {
+        containerBody.image_url = opts.imageUrl;
+      }
+      if (opts.videoUrl) {
+        containerBody.video_url = opts.videoUrl;
+        containerBody.media_type = 'REELS';
+      }
+      if (opts.caption) containerBody.caption = opts.caption;
+      if (opts.locationId) containerBody.location_id = opts.locationId;
+      if (opts.userTags) containerBody.user_tags = opts.userTags;
+      if (opts.coverUrl) containerBody.cover_url = opts.coverUrl;
+      if (opts.shareToFeed !== undefined) containerBody.share_to_feed = String(opts.shareToFeed);
+      if (opts.collaborators) containerBody.collaborators = JSON.stringify(opts.collaborators.split(','));
+
+      const containerResponse = await client.request(`${instagramId}/media`, {
+        method: 'POST',
+        body: containerBody,
+      });
+
+      const containerId = (containerResponse.data as Record<string, unknown>).id as string;
+
+      // Step 2: For videos, wait for processing
+      if (opts.videoUrl) {
+        console.error('Video uploaded, waiting for processing...');
+        let status = 'IN_PROGRESS';
+        let attempts = 0;
+        while (status === 'IN_PROGRESS' && attempts < 30) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          const statusResponse = await client.request(containerId, {
+            params: { fields: 'status_code' },
+          });
+          status = (statusResponse.data as Record<string, unknown>).status_code as string;
+          attempts++;
+          if (status === 'ERROR') {
+            throw new Error('Video processing failed');
+          }
+        }
+      }
+
+      // Step 3: Publish
+      const publishResponse = await client.request(`${instagramId}/media_publish`, {
+        method: 'POST',
+        body: { creation_id: containerId },
+      });
+
+      console.log(formatOutput(publishResponse.data, opts.output as OutputFormat));
+    }));
+
+  instagram
+    .command('publish-carousel <instagramId>')
+    .description('Publish a carousel (multi-image/video) post to Instagram')
+    .requiredOption('--items <json>', 'JSON array of items: [{"image_url":"..."}, {"video_url":"..."}]')
+    .option('--caption <text>', 'Post caption')
+    .option('--location-id <id>', 'Facebook Page location ID')
+    .option('--collaborators <usernames>', 'Comma-separated collaborator usernames')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (instagramId: string, opts) => {
+      const client = getClient();
+      const items = JSON.parse(opts.items) as Array<Record<string, string>>;
+
+      if (items.length < 2 || items.length > 10) {
+        throw new Error('Carousel requires 2-10 items');
+      }
+
+      // Step 1: Create child containers
+      const childIds: string[] = [];
+      for (const item of items) {
+        const childBody: Record<string, string> = {
+          is_carousel_item: 'true',
+        };
+        if (item.image_url) childBody.image_url = item.image_url;
+        if (item.video_url) {
+          childBody.video_url = item.video_url;
+          childBody.media_type = 'VIDEO';
+        }
+
+        const childResponse = await client.request(`${instagramId}/media`, {
+          method: 'POST',
+          body: childBody,
+        });
+        childIds.push((childResponse.data as Record<string, unknown>).id as string);
+      }
+
+      // Step 2: Create carousel container
+      const carouselBody: Record<string, string> = {
+        media_type: 'CAROUSEL',
+        children: childIds.join(','),
+      };
+      if (opts.caption) carouselBody.caption = opts.caption;
+      if (opts.locationId) carouselBody.location_id = opts.locationId;
+      if (opts.collaborators) carouselBody.collaborators = JSON.stringify(opts.collaborators.split(','));
+
+      const carouselResponse = await client.request(`${instagramId}/media`, {
+        method: 'POST',
+        body: carouselBody,
+      });
+
+      const carouselId = (carouselResponse.data as Record<string, unknown>).id as string;
+
+      // Step 3: Publish
+      const publishResponse = await client.request(`${instagramId}/media_publish`, {
+        method: 'POST',
+        body: { creation_id: carouselId },
+      });
+
+      console.log(formatOutput(publishResponse.data, opts.output as OutputFormat));
+    }));
+
+  instagram
+    .command('publish-story <instagramId>')
+    .description('Publish a story to Instagram')
+    .option('--image-url <url>', 'Public image URL')
+    .option('--video-url <url>', 'Public video URL')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (instagramId: string, opts) => {
+      if (!opts.imageUrl && !opts.videoUrl) {
+        throw new Error('Either --image-url or --video-url is required');
+      }
+      const client = getClient();
+
+      const containerBody: Record<string, string> = {
+        media_type: 'STORIES',
+      };
+      if (opts.imageUrl) containerBody.image_url = opts.imageUrl;
+      if (opts.videoUrl) containerBody.video_url = opts.videoUrl;
+
+      const containerResponse = await client.request(`${instagramId}/media`, {
+        method: 'POST',
+        body: containerBody,
+      });
+
+      const containerId = (containerResponse.data as Record<string, unknown>).id as string;
+
+      // Wait briefly for processing
+      if (opts.videoUrl) {
+        console.error('Video uploaded, waiting for processing...');
+        let status = 'IN_PROGRESS';
+        let attempts = 0;
+        while (status === 'IN_PROGRESS' && attempts < 30) {
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          const statusResponse = await client.request(containerId, {
+            params: { fields: 'status_code' },
+          });
+          status = (statusResponse.data as Record<string, unknown>).status_code as string;
+          attempts++;
+        }
+      }
+
+      const publishResponse = await client.request(`${instagramId}/media_publish`, {
+        method: 'POST',
+        body: { creation_id: containerId },
+      });
+
+      console.log(formatOutput(publishResponse.data, opts.output as OutputFormat));
+    }));
+
   // ── Media ─────────────────────────────────────────────
 
   instagram

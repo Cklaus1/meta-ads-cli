@@ -30,6 +30,8 @@ import { registerSchemaCommands } from './commands/schema.js';
 import { registerGenerateSkillsCommand } from './commands/generate-skills.js';
 import { registerThreadsCommands } from './commands/threads.js';
 import { registerSetupCommand } from './commands/setup.js';
+import { registerProfileCommands } from './commands/profile.js';
+import { applyProfile } from './profiles.js';
 import logger from './logger.js';
 
 const program = new Command();
@@ -40,7 +42,14 @@ program
   .version('0.2.0')
   .option('--dry-run', 'Preview the API request without executing it')
   .option('--read-only', 'Restrict to read-only operations (block POST/DELETE)')
-  .option('--api-version <version>', 'Graph API version (default: v25.0)', 'v25.0');
+  .option('--api-version <version>', 'Graph API version (default: v25.0)', 'v25.0')
+  .option('--profile <name>', 'Use a named profile for credentials and account');
+
+// Apply profile before anything else (sets env vars)
+const profileIdx = process.argv.indexOf('--profile');
+if (profileIdx !== -1 && process.argv[profileIdx + 1]) {
+  applyProfile(process.argv[profileIdx + 1]);
+}
 
 // Determine flags from env or argv
 const dryRun = process.argv.includes('--dry-run');
@@ -120,7 +129,8 @@ registerWorkflowCommands(program, getClient);
 // Threads (content publishing & insights)
 registerThreadsCommands(program, getClient);
 
-// Utilities
+// Profiles & Utilities
+registerProfileCommands(program);
 registerSchemaCommands(program);
 registerGenerateSkillsCommand(program);
 registerSetupCommand(program, getAuth);
@@ -135,7 +145,7 @@ program.hook('preAction', async (thisCommand) => {
   }
 
   // Skip auth initialization for auth/setup/schema/generate-skills commands and dry-run
-  const skipAuth = ['auth', 'setup', 'schema', 'generate-skills'];
+  const skipAuth = ['auth', 'setup', 'schema', 'generate-skills', 'profile'];
   if (skipAuth.some(s => commandChain.includes(s))) return;
   if (dryRun) return;
 
