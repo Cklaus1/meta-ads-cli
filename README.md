@@ -1,25 +1,32 @@
 # Meta Ads CLI
 
-A standalone command-line tool for managing Facebook & Instagram advertising via the Meta Graph API. Built for both humans and AI agents.
+A standalone command-line tool for managing Facebook, Instagram, Threads & WhatsApp advertising via the Meta Graph API. Built for both humans and AI agents.
 
-**29 command groups | 150 subcommands | Full Meta Ads API coverage**
+**30 command groups | 170+ subcommands | Graph API v25.0 | Full Meta platform coverage**
 
 ## Features
 
 - **Full campaign lifecycle** — Create, read, update, delete campaigns, ad sets, ads, and creatives
+- **All Meta platforms** — Facebook, Instagram, Threads, Messenger, WhatsApp, Audience Network
+- **Placement targeting** — Control exactly where ads appear across 25+ positions
+- **Advantage+ support** — Unified campaign structure with automation levers
 - **Audience management** — Custom audiences, lookalikes, retargeting funnels, overlap analysis
 - **Performance analytics** — Insights, trends, creative fatigue detection, anomaly detection
 - **AI intelligence** — Performance scoring, optimization recommendations, ML dataset export
-- **Conversion tracking** — Conversions API (server-side events), pixels, custom conversions
-- **E-commerce** — Product catalogs, dynamic ads, collection ads, Instagram Shopping
-- **Bidding & budget** — Strategy validation, automated adjustments, seasonal scheduling, scaling recommendations
+- **Conversion tracking** — Conversions API (server-side events, batch, offline), pixels, custom conversions
+- **E-commerce** — Product catalogs (full CRUD), feeds, dynamic ads, collection ads, Instagram Shopping
+- **Pages management** — Posts, comments, replies, page insights, post insights
+- **Instagram management** — Media, stories, reels insights, comments, account metrics
+- **Threads** — Post, reply, search, insights, conversation threads
+- **Lead generation** — Forms CRUD, lead export, quality analysis, webhooks
+- **Bidding & budget** — Strategy validation, automated adjustments, seasonal scheduling
+- **Creative management** — Clone with overrides, upload image/video, carousel support
 - **Bulk operations** — Batch campaign creation, status updates, parallel analysis
 - **A/B testing** — Create and analyze bid strategy experiments
 - **Competitive intelligence** — Ads Library search, batch brand monitoring
 - **Cross-service workflows** — Campaign health checks, full audits, one-command launches
 - **Multi-format output** — JSON, table, CSV, text, YAML (`-o` flag)
 - **Safety** — `--dry-run`, `--read-only`, input validation
-- **Environment compatibility** — Accepts common Meta env vars for easy integration
 - **Agent skills** — Generate SKILL.md files for Claude Code / OpenClaw agents
 
 ## Requirements
@@ -58,6 +65,12 @@ meta-ads accounts list
 
 # 5. List campaigns
 meta-ads campaigns list --account-id act_123456789
+
+# 6. Get insights with time range
+meta-ads insights account --time-range last_7d
+
+# 7. Break down by platform (Facebook, Instagram, Threads, etc.)
+meta-ads insights get act_123 --level account --breakdown publisher_platform
 ```
 
 ## Authentication
@@ -123,11 +136,11 @@ meta-ads insights get 12345 -o csv > report.csv
 |---------|-------------|-------------|
 | `auth` | login, logout, status, setup, login-link, refresh-token | Authentication management |
 | `accounts` | list, get | Ad account management |
-| `campaigns` | list, get, create, update, delete | Campaign CRUD |
-| `adsets` | list, get, create, update, delete | Ad set CRUD |
-| `ads` | list, get, create, update, delete | Ad CRUD |
-| `creatives` | list, get, get-for-ad, create-image, create-video, update, upload-image, upload-video, save-image | Creative management |
-| `insights` | get, account, video | Performance metrics |
+| `campaigns` | list, get, create, update, delete | Campaign CRUD with Advantage+ fields |
+| `adsets` | list, get, create, update, delete | Ad set CRUD with placement targeting |
+| `ads` | list, get, create, update, delete | Ad CRUD with scheduling & review feedback |
+| `creatives` | list, get, get-for-ad, create-image, create-video, clone, update, upload-image, upload-video, save-image | Creative management |
+| `insights` | get, account, video | Performance metrics with time-range filtering |
 
 ### Targeting & Audiences
 
@@ -138,14 +151,20 @@ meta-ads insights get 12345 -o csv > report.csv
 | `retargeting` | website-behavior, video-engagement, app-event, product, funnel, dynamic-campaign, frequency-optimization | Retargeting strategies |
 | `pixels` | list, create, events | Pixel management |
 
-### Pages, Leads & E-commerce
+### Pages & Content
 
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
-| `pages` | list, search | Facebook Page management |
-| `leads` | forms, get, create-form, export, quality, webhooks | Lead generation |
-| `catalog` | list, get, products, product-sets, create, create-product-set, upload-feed, dynamic-template, collection-ad, product-performance | Product catalog |
-| `instagram` | sync-catalog, create-shopping-ad, profile, shopping-insights | Instagram Shopping |
+| `pages` | list, get, search, posts, create-post, update-post, delete-post, comments, reply, delete-comment, insights, post-insights | Facebook Page management |
+| `threads` | profile, create, list, get, replies, conversation, delete, hide-reply, insights, post-insights, search | Threads publishing & insights |
+| `instagram` | sync-catalog, create-shopping-ad, profile, media, media-get, media-insights, stories, story-insights, comments, reply-comment, delete-comment, insights, shopping-insights | Instagram management |
+
+### Leads & E-commerce
+
+| Command | Subcommands | Description |
+|---------|-------------|-------------|
+| `leads` | forms, get, create-form, update-form, delete-form, export, quality, webhooks | Lead generation |
+| `catalog` | list, get, products, get-product, create-product, update-product, delete-product, feeds, create-feed, product-sets, create-product-set, upload-feed, dynamic-template, collection-ad, product-performance | Product catalog |
 
 ### Bidding & Budget
 
@@ -173,22 +192,42 @@ meta-ads insights get 12345 -o csv > report.csv
 
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
-| `conversions` | send-event, custom-conversions, create-custom, setup-tracking, validate-setup | Server-side tracking |
+| `conversions` | send-event, send-batch, custom-conversions, create-custom, setup-tracking, validate-setup, offline-events, offline-event-sets, create-offline-set | Server-side & offline tracking |
 | `monitor` | check, auto-pause, dashboard | Performance monitoring |
 
-### Workflows
+### Workflows & Utilities
 
 | Command | Subcommands | Description |
 |---------|-------------|-------------|
 | `workflow` | campaign-health, full-audit, launch-campaign, duplicate-and-test | Multi-step workflows |
+| `schema` | (service) (operation) | API endpoint introspection |
+| `generate-skills` | | Generate SKILL.md files for AI agents |
+| `setup` | | Interactive configuration wizard |
 
-### Utilities
+## Placement Targeting
 
-| Command | Description |
-|---------|-------------|
-| `schema [service] [operation]` | API endpoint introspection |
-| `generate-skills` | Generate SKILL.md files for AI agents |
-| `setup` | Interactive configuration wizard |
+Control exactly where ads appear:
+
+```bash
+# Facebook + Instagram + Threads only
+meta-ads adsets create \
+  --campaign-id 123 --name "Multi-platform" \
+  --optimization-goal LINK_CLICKS --billing-event IMPRESSIONS \
+  --publisher-platforms facebook,instagram,threads \
+  --facebook-positions feed,reels,story \
+  --instagram-positions stream,reels,explore \
+  --threads-positions threads_stream \
+  --daily-budget 5000
+
+# WhatsApp Status ads
+meta-ads adsets create \
+  --campaign-id 123 --name "WhatsApp Status" \
+  --destination-type WHATSAPP \
+  --publisher-platforms whatsapp \
+  --whatsapp-positions status \
+  --optimization-goal CONVERSATIONS --billing-event IMPRESSIONS \
+  --daily-budget 5000
+```
 
 ## Pagination
 
@@ -213,27 +252,23 @@ meta-ads campaigns create --account-id act_123 --name "Test" --objective OUTCOME
 # [dry-run] Body: {"name":"Test","objective":"OUTCOME_TRAFFIC",...}
 ```
 
-## Workflows
-
-Combine multiple API calls in a single command:
+## Testing
 
 ```bash
-# Full campaign health check (details + insights + adsets + ads)
-meta-ads workflow campaign-health 12345
+# Run all tests
+npm test
 
-# Full account audit with recommendations
-meta-ads workflow full-audit --account-id act_123
+# Unit tests only
+npm run test:unit
 
-# Launch campaign + adset + ad in one step
-meta-ads workflow launch-campaign \
-  --account-id act_123 \
-  --name "My Campaign" \
-  --objective OUTCOME_TRAFFIC \
-  --daily-budget 5000 \
-  --creative-id 67890
+# Integration tests
+npm run test:integration
 
-# Duplicate and set up A/B test
-meta-ads workflow duplicate-and-test 12345 --variant-strategy COST_CAP
+# E2E tests
+npm run test:e2e
+
+# Watch mode
+npm run test:watch
 ```
 
 ## Environment Variables
@@ -249,60 +284,6 @@ meta-ads workflow duplicate-and-test 12345 --variant-strategy COST_CAP
 | `META_ADS_CLI_LOG_FILE` | Log file path (daily rotation) | Optional |
 
 Alternate names: `META_ACCESS_TOKEN`, `META_APP_ID`, `META_APP_SECRET` are also accepted.
-
-## Environment Compatibility
-
-The CLI accepts common Meta Ads environment variables (`META_ACCESS_TOKEN`, `META_APP_ID`, `META_APP_SECRET`) alongside its own `META_ADS_CLI_*` variants, making it easy to integrate into existing workflows.
-
-## Architecture
-
-```
-src/
-├── index.ts           # Entry point, command registration, pre-action hooks
-├── auth.ts            # Meta OAuth, token cache (keytar + file fallback)
-├── meta-client.ts     # Graph API client (retry, pagination, dry-run, read-only, upload)
-├── formatter.ts       # Output formatting (json, table, csv, text, yaml)
-├── errors.ts          # handleErrors() wrapper
-├── logger.ts          # Structured JSON logging with daily rotation
-├── validate.ts        # Input validation (paths, control chars, IDs)
-├── mime.ts            # MIME type detection for uploads
-└── commands/          # 27 command modules
-    ├── auth.ts        # 7 subcommands
-    ├── accounts.ts    # 3 subcommands
-    ├── campaigns.ts   # 6 subcommands
-    ├── adsets.ts      # 6 subcommands
-    ├── ads.ts         # 6 subcommands
-    ├── creatives.ts   # 10 subcommands
-    ├── insights.ts    # 4 subcommands
-    ├── targeting.ts   # 7 subcommands
-    ├── audiences.ts   # 8 subcommands (+ pixels: 4)
-    ├── retargeting.ts # 8 subcommands
-    ├── pages.ts       # 3 subcommands
-    ├── leads.ts       # 7 subcommands
-    ├── catalog.ts     # 11 subcommands
-    ├── instagram.ts   # 5 subcommands
-    ├── bidding.ts     # 12 subcommands
-    ├── duplication.ts # 5 subcommands
-    ├── bulk.ts        # 5 subcommands
-    ├── ads-library.ts # 4 subcommands
-    ├── analytics.ts   # 6 subcommands
-    ├── ai.ts          # 5 subcommands
-    ├── ab-testing.ts  # 3 subcommands
-    ├── conversions.ts # 6 subcommands
-    ├── monitoring.ts  # 4 subcommands
-    ├── workflows.ts   # 5 subcommands
-    ├── schema.ts      # API introspection
-    ├── generate-skills.ts
-    └── setup.ts       # Interactive wizard
-```
-
-**Key patterns:**
-- Commander.js with lazy-initialized singletons
-- Pre-action hooks for auth (skip for auth/setup/schema)
-- Dependency injection (`getClient()` callbacks)
-- `handleErrors()` wrapper on all actions
-- Retry with exponential backoff (429/5xx)
-- Cursor-based pagination via `paging.cursors.after`
 
 ## Development
 
@@ -320,7 +301,7 @@ npm run build
 node dist/index.js --help
 ```
 
-**Build:** `tsup` (esbuild) → `dist/index.js` (ESM, shebang banner, ~194KB)
+**Build:** `tsup` (esbuild) → `dist/index.js` (ESM, shebang banner)
 
 ## License
 

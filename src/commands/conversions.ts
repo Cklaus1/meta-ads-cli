@@ -113,6 +113,107 @@ export function registerConversionCommands(program: Command, getClient: () => Me
     }));
 
   conversions
+    .command('send-batch')
+    .description('Send multiple conversion events in a single batch request')
+    .requiredOption('--pixel-id <id>', 'Meta Pixel ID')
+    .requiredOption('--events <json>', 'JSON array of event objects [{event_name, event_time, user_data, custom_data}, ...]')
+    .option('--test-event-code <code>', 'Test event code from Events Manager')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      const client = getClient();
+      const events = JSON.parse(opts.events) as Array<Record<string, unknown>>;
+
+      // Ensure each event has event_time
+      for (const event of events) {
+        if (!event.event_time) {
+          event.event_time = Math.floor(Date.now() / 1000);
+        }
+        if (!event.action_source) {
+          event.action_source = 'website';
+        }
+      }
+
+      const body: Record<string, string> = {
+        data: JSON.stringify(events),
+      };
+      if (opts.testEventCode) body.test_event_code = opts.testEventCode;
+
+      const response = await client.request(`${opts.pixelId}/events`, {
+        method: 'POST',
+        body,
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  conversions
+    .command('offline-events')
+    .description('Send offline conversion events (in-store purchases, phone orders)')
+    .requiredOption('--event-set-id <id>', 'Offline event set ID')
+    .requiredOption('--events <json>', 'JSON array of offline event objects')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      const client = getClient();
+      const events = JSON.parse(opts.events) as Array<Record<string, unknown>>;
+
+      for (const event of events) {
+        if (!event.event_time) {
+          event.event_time = Math.floor(Date.now() / 1000);
+        }
+      }
+
+      const body: Record<string, string> = {
+        data: JSON.stringify(events),
+      };
+
+      const response = await client.request(`${opts.eventSetId}/events`, {
+        method: 'POST',
+        body,
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  conversions
+    .command('offline-event-sets')
+    .description('List offline event sets for an account')
+    .option('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      if (!opts.accountId) throw new Error('Account ID required');
+      const client = getClient();
+      const params: Record<string, string> = {
+        fields: 'id,name,description,event_stats,data_use_setting,creation_time',
+      };
+
+      const response = await client.request(`${opts.accountId}/offline_conversion_data_sets`, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  conversions
+    .command('create-offline-set')
+    .description('Create an offline event set')
+    .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
+    .requiredOption('--name <name>', 'Event set name')
+    .option('--description <text>', 'Event set description')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      if (!opts.accountId) throw new Error('Account ID required');
+      const client = getClient();
+      const body: Record<string, string> = {
+        name: opts.name,
+      };
+      if (opts.description) body.description = opts.description;
+
+      const response = await client.request(`${opts.accountId}/offline_conversion_data_sets`, {
+        method: 'POST',
+        body,
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  conversions
     .command('validate-setup <pixelId>')
     .description('Validate conversion tracking setup for a pixel')
     .option('-o, --output <format>', 'Output format', 'json')

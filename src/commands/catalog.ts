@@ -100,6 +100,165 @@ export function registerCatalogCommands(program: Command, getClient: () => MetaC
     }));
 
   catalog
+    .command('get-product <productId>')
+    .description('Get detailed info for a specific product')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (productId: string, opts) => {
+      const client = getClient();
+      const params: Record<string, string> = {
+        fields: 'id,name,description,price,currency,image_url,url,availability,brand,category,sale_price,sale_price_start_date,sale_price_end_date,condition,retailer_id,custom_label_0,custom_label_1,custom_label_2',
+      };
+
+      const response = await client.request(productId, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  catalog
+    .command('create-product')
+    .description('Add a product to a catalog')
+    .requiredOption('--catalog-id <id>', 'Catalog ID')
+    .requiredOption('--retailer-id <id>', 'Unique product identifier (retailer_id/SKU)')
+    .requiredOption('--name <name>', 'Product name')
+    .requiredOption('--price <amount>', 'Price (e.g., "29.99 USD")')
+    .requiredOption('--url <url>', 'Product page URL')
+    .requiredOption('--image-url <url>', 'Product image URL')
+    .option('--description <text>', 'Product description')
+    .option('--brand <brand>', 'Product brand')
+    .option('--category <category>', 'Product category')
+    .option('--availability <status>', 'Availability: in stock, out of stock, preorder, available for order', 'in stock')
+    .option('--condition <condition>', 'Condition: new, refurbished, used', 'new')
+    .option('--sale-price <amount>', 'Sale price (e.g., "19.99 USD")')
+    .option('--custom-label-0 <label>', 'Custom label 0')
+    .option('--custom-label-1 <label>', 'Custom label 1')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      const client = getClient();
+
+      // Parse price into value and currency
+      const priceParts = opts.price.split(' ');
+      const priceValue = Math.round(parseFloat(priceParts[0]) * 100);
+      const currency = priceParts[1] || 'USD';
+
+      const body: Record<string, string> = {
+        retailer_id: opts.retailerId,
+        name: opts.name,
+        price: String(priceValue),
+        currency: currency,
+        url: opts.url,
+        image_url: opts.imageUrl,
+        availability: opts.availability,
+        condition: opts.condition,
+      };
+
+      if (opts.description) body.description = opts.description;
+      if (opts.brand) body.brand = opts.brand;
+      if (opts.category) body.category = opts.category;
+      if (opts.salePrice) {
+        const saleParts = opts.salePrice.split(' ');
+        body.sale_price = String(Math.round(parseFloat(saleParts[0]) * 100));
+        body.sale_price_currency = saleParts[1] || currency;
+      }
+      if (opts.customLabel_0) body.custom_label_0 = opts.customLabel_0;
+      if (opts.customLabel_1) body.custom_label_1 = opts.customLabel_1;
+
+      const response = await client.request(`${opts.catalogId}/products`, {
+        method: 'POST',
+        body,
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  catalog
+    .command('update-product <productId>')
+    .description('Update an existing product')
+    .option('--name <name>', 'Product name')
+    .option('--price <amount>', 'Price (e.g., "29.99 USD")')
+    .option('--url <url>', 'Product page URL')
+    .option('--image-url <url>', 'Product image URL')
+    .option('--description <text>', 'Product description')
+    .option('--availability <status>', 'Availability: in stock, out of stock, preorder')
+    .option('--sale-price <amount>', 'Sale price (e.g., "19.99 USD")')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (productId: string, opts) => {
+      const client = getClient();
+      const body: Record<string, string> = {};
+
+      if (opts.name) body.name = opts.name;
+      if (opts.url) body.url = opts.url;
+      if (opts.imageUrl) body.image_url = opts.imageUrl;
+      if (opts.description) body.description = opts.description;
+      if (opts.availability) body.availability = opts.availability;
+      if (opts.price) {
+        const priceParts = opts.price.split(' ');
+        body.price = String(Math.round(parseFloat(priceParts[0]) * 100));
+        body.currency = priceParts[1] || 'USD';
+      }
+      if (opts.salePrice) {
+        const saleParts = opts.salePrice.split(' ');
+        body.sale_price = String(Math.round(parseFloat(saleParts[0]) * 100));
+      }
+
+      if (Object.keys(body).length === 0) {
+        throw new Error('No update parameters provided');
+      }
+
+      const response = await client.request(productId, {
+        method: 'POST',
+        body,
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  catalog
+    .command('delete-product <productId>')
+    .description('Delete a product from a catalog')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (productId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(productId, { method: 'DELETE' });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  catalog
+    .command('feeds <catalogId>')
+    .description('List product feeds for a catalog')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (catalogId: string, opts) => {
+      const client = getClient();
+      const params: Record<string, string> = {
+        fields: 'id,name,created_time,product_count,latest_upload,schedule',
+      };
+
+      const response = await client.request(`${catalogId}/product_feeds`, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  catalog
+    .command('create-feed')
+    .description('Create a product feed for a catalog')
+    .requiredOption('--catalog-id <id>', 'Catalog ID')
+    .requiredOption('--name <name>', 'Feed name')
+    .requiredOption('--feed-url <url>', 'URL to fetch product feed from')
+    .option('--schedule <json>', 'Feed schedule as JSON (e.g., {"interval":"HOURLY"})')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (opts) => {
+      const client = getClient();
+      const body: Record<string, string> = {
+        name: opts.name,
+        schedule: opts.schedule || JSON.stringify({ interval: 'DAILY', url: opts.feedUrl }),
+      };
+
+      const response = await client.request(`${opts.catalogId}/product_feeds`, {
+        method: 'POST',
+        body,
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  catalog
     .command('create-product-set')
     .description('Create a product set within a catalog')
     .requiredOption('--catalog-id <id>', 'Catalog ID')

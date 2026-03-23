@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Meta Ads CLI is a standalone TypeScript CLI for managing Facebook/Instagram advertising via the Meta Graph API. 29 command groups, 150+ subcommands.
+Meta Ads CLI is a standalone TypeScript CLI for managing Facebook, Instagram, Threads & WhatsApp advertising via the Meta Graph API. 30 command groups, 170+ subcommands.
 
 **License:** CC-BY-NC-4.0 | **Node.js:** >=18 | **Framework:** Commander.js v11
 
@@ -18,7 +18,13 @@ node dist/index.js --help  # Run built CLI
 npm link && meta-ads --help  # Link globally
 ```
 
-There are no tests yet. When adding tests, use `vitest`.
+```bash
+npm test                   # Run all tests (vitest)
+npm run test:unit          # Unit tests only
+npm run test:integration   # Integration tests only
+npm run test:e2e           # E2E tests only
+npm run test:watch         # Watch mode
+```
 
 ## Architecture
 
@@ -43,7 +49,7 @@ There are no tests yet. When adding tests, use `vitest`.
 
 ### Command Pattern
 
-All 27 command files in `src/commands/` follow this pattern:
+All 28 command files in `src/commands/` follow this pattern:
 
 ```typescript
 export function registerXxxCommands(program: Command, getClient: () => MetaClient): void {

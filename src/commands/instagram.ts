@@ -20,19 +20,16 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
     .action(handleErrors(async (opts) => {
       const client = getClient();
 
-      // Verify Instagram account
       const igParams: Record<string, string> = {
         fields: 'id,username,name,followers_count,is_business_account',
       };
       const igResponse = await client.request(opts.instagramId, { params: igParams });
 
-      // Get catalog info
       const catParams: Record<string, string> = {
         fields: 'id,name,product_count,vertical',
       };
       const catResponse = await client.request(opts.catalogId, { params: catParams });
 
-      // Setup catalog connection
       const response = await client.request(`${opts.instagramId}/product_catalogs`, {
         method: 'POST',
         body: { catalog_id: opts.catalogId },
@@ -110,6 +107,174 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
         const response = await client.request(instagramId, { params });
         console.log(formatOutput(response.data, opts.output as OutputFormat));
       }
+    }));
+
+  // ── Media ─────────────────────────────────────────────
+
+  instagram
+    .command('media <instagramId>')
+    .description('List media (posts, reels, stories) for an Instagram account')
+    .option('--limit <n>', 'Maximum media items', '25')
+    .option('--all', 'Fetch all pages')
+    .option('--page-limit <n>', 'Max pages when using --all')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (instagramId: string, opts) => {
+      const client = getClient();
+      const params: Record<string, string> = {
+        fields: 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count,is_shared_to_feed',
+        limit: opts.limit,
+      };
+
+      const endpoint = `${instagramId}/media`;
+      const response = opts.all
+        ? await client.requestAllPages(endpoint, { params },
+            opts.pageLimit ? parseInt(opts.pageLimit) : undefined)
+        : await client.request(endpoint, { params });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  instagram
+    .command('media-get <mediaId>')
+    .description('Get detailed info for a specific media item')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (mediaId: string, opts) => {
+      const client = getClient();
+      const params: Record<string, string> = {
+        fields: 'id,caption,media_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count,is_shared_to_feed,children{id,media_type,media_url}',
+      };
+
+      const response = await client.request(mediaId, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  instagram
+    .command('media-insights <mediaId>')
+    .description('Get insights for a specific media item')
+    .option('--metrics <list>', 'Comma-separated metrics (defaults vary by media type)')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (mediaId: string, opts) => {
+      const client = getClient();
+      const defaultMetrics = 'impressions,reach,engagement,saved,video_views,likes,comments,shares';
+      const params: Record<string, string> = {
+        metric: opts.metrics || defaultMetrics,
+      };
+
+      const response = await client.request(`${mediaId}/insights`, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  instagram
+    .command('stories <instagramId>')
+    .description('List active stories for an Instagram account')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (instagramId: string, opts) => {
+      const client = getClient();
+      const params: Record<string, string> = {
+        fields: 'id,caption,media_type,media_url,permalink,timestamp',
+      };
+
+      const response = await client.request(`${instagramId}/stories`, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  instagram
+    .command('story-insights <storyId>')
+    .description('Get insights for a specific story')
+    .option('--metrics <list>', 'Comma-separated metrics', 'impressions,reach,replies,exits,taps_forward,taps_back')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (storyId: string, opts) => {
+      const client = getClient();
+      const params: Record<string, string> = {
+        metric: opts.metrics,
+      };
+
+      const response = await client.request(`${storyId}/insights`, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  // ── Comments ──────────────────────────────────────────
+
+  instagram
+    .command('comments <mediaId>')
+    .description('List comments on an Instagram media item')
+    .option('--limit <n>', 'Maximum comments', '25')
+    .option('--all', 'Fetch all pages')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (mediaId: string, opts) => {
+      const client = getClient();
+      const params: Record<string, string> = {
+        fields: 'id,text,username,timestamp,like_count,replies{id,text,username,timestamp}',
+        limit: opts.limit,
+      };
+
+      const endpoint = `${mediaId}/comments`;
+      const response = opts.all
+        ? await client.requestAllPages(endpoint, { params })
+        : await client.request(endpoint, { params });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  instagram
+    .command('reply-comment <commentId>')
+    .description('Reply to an Instagram comment')
+    .requiredOption('--message <text>', 'Reply message')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (commentId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(`${commentId}/replies`, {
+        method: 'POST',
+        body: { message: opts.message },
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  instagram
+    .command('delete-comment <commentId>')
+    .description('Delete an Instagram comment')
+    .option('--hide', 'Hide instead of delete')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (commentId: string, opts) => {
+      const client = getClient();
+      if (opts.hide) {
+        const response = await client.request(commentId, {
+          method: 'POST',
+          body: { hide: 'true' },
+        });
+        console.log(formatOutput(response.data, opts.output as OutputFormat));
+      } else {
+        const response = await client.request(commentId, { method: 'DELETE' });
+        console.log(formatOutput(response.data, opts.output as OutputFormat));
+      }
+    }));
+
+  // ── Account Insights ──────────────────────────────────
+
+  instagram
+    .command('insights <instagramId>')
+    .description('Get account-level Instagram insights')
+    .option('--metrics <list>', 'Comma-separated metrics', 'impressions,reach,profile_views,website_clicks,follower_count,email_contacts,phone_call_clicks,text_message_clicks,get_directions_clicks')
+    .option('--period <period>', 'Aggregation period: day, week, days_28, month, lifetime', 'day')
+    .option('--time-range <range>', 'Time range', 'last_30d')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (instagramId: string, opts) => {
+      const client = getClient();
+      const params: Record<string, string> = {
+        metric: opts.metrics,
+        period: opts.period,
+      };
+
+      const resolved = resolveTimeRange(opts.timeRange);
+      if (resolved) {
+        const range = JSON.parse(resolved);
+        params.since = range.since;
+        params.until = range.until;
+      }
+
+      const response = await client.request(`${instagramId}/insights`, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
   instagram

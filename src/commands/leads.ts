@@ -87,6 +87,45 @@ export function registerLeadCommands(program: Command, getClient: () => MetaClie
     }));
 
   leads
+    .command('update-form <formId>')
+    .description('Update a lead form')
+    .option('--name <name>', 'New form name')
+    .option('--status <status>', 'New status (ACTIVE, ARCHIVED)')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (formId: string, opts) => {
+      const client = getClient();
+      const body: Record<string, string> = {};
+
+      if (opts.name) body.name = opts.name;
+      if (opts.status) body.status = opts.status;
+
+      if (Object.keys(body).length === 0) {
+        throw new Error('No update parameters provided');
+      }
+
+      const response = await client.request(formId, {
+        method: 'POST',
+        body,
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  leads
+    .command('delete-form <formId>')
+    .description('Archive/delete a lead form')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (formId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(formId, {
+        method: 'POST',
+        body: { status: 'ARCHIVED' },
+      });
+
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  leads
     .command('export <formId>')
     .description('Export all leads from a form (fetches all pages)')
     .option('-o, --output <format>', 'Output format (csv recommended for export)', 'csv')

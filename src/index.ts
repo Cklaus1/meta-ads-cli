@@ -28,6 +28,7 @@ import { registerMonitoringCommands } from './commands/monitoring.js';
 import { registerWorkflowCommands } from './commands/workflows.js';
 import { registerSchemaCommands } from './commands/schema.js';
 import { registerGenerateSkillsCommand } from './commands/generate-skills.js';
+import { registerThreadsCommands } from './commands/threads.js';
 import { registerSetupCommand } from './commands/setup.js';
 import logger from './logger.js';
 
@@ -115,6 +116,9 @@ registerMonitoringCommands(program, getClient);
 
 // Cross-service workflows
 registerWorkflowCommands(program, getClient);
+
+// Threads (content publishing & insights)
+registerThreadsCommands(program, getClient);
 
 // Utilities
 registerSchemaCommands(program);
