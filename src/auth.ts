@@ -207,6 +207,20 @@ export class AuthManager {
         res.end('Not found');
       });
 
+      server.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          reject(new Error(
+            'Port 8899 is already in use — another "meta-ads auth login" may still be running.\n'
+            + 'Free it and try again:\n'
+            + '  lsof -iTCP:8899 -sTCP:LISTEN     # find the process\n'
+            + '  fuser -k 8899/tcp               # or kill it directly\n'
+            + 'If nothing is listed, wait up to 5 minutes for a stale login to time out, then retry.'
+          ));
+        } else {
+          reject(err);
+        }
+      });
+
       server.listen(8899, () => {
         const authUrl = `https://www.facebook.com/${API_VERSION}/dialog/oauth?client_id=${this.appId}&redirect_uri=${encodeURIComponent(AUTH_REDIRECT_URI)}&scope=${AUTH_SCOPE}&response_type=token`;
         console.log('\nOpen this URL in your browser to authenticate:\n');
@@ -215,10 +229,11 @@ export class AuthManager {
       });
 
       // Timeout after 5 minutes
-      setTimeout(() => {
+      const timeout = setTimeout(() => {
         server.close();
         reject(new Error('Authentication timed out after 5 minutes'));
       }, 300000);
+      timeout.unref();
     });
   }
 
