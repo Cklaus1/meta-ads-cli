@@ -2,10 +2,47 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { isLlmAvailable, llmProviderLabel, reasonStructured } from '../llm.js';
+import { computeBenchmarks, classify, LOWER_IS_BETTER } from '../benchmark.js';
+import { resolveTimeRange } from '../time-range.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
+
+/** Pull a named action value out of Meta's actions[] array. */
+function actionValue(actions: unknown, ...types: string[]): number | undefined {
+  if (!Array.isArray(actions)) return undefined;
+  for (const t of types) {
+    const hit = actions.find((a) => (a as { action_type?: string }).action_type === t);
+    if (hit) return parseInt(String((hit as { value?: string }).value || 0), 10);
+  }
+  return undefined;
+}
+
+const RECS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'recommendations'],
+  properties: {
+    summary: { type: 'string', description: 'One-paragraph account-level read on performance.' },
+    recommendations: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['priority', 'campaign', 'finding', 'action', 'rationale'],
+        properties: {
+          priority: { type: 'string', enum: ['high', 'medium', 'low'] },
+          campaign: { type: 'string', description: 'Campaign name (or "account" for account-wide).' },
+          finding: { type: 'string', description: 'What the data shows.' },
+          action: { type: 'string', description: 'Specific recommended action.' },
+          rationale: { type: 'string', description: 'Why, grounded in the metrics + benchmarks provided.' },
+        },
+      },
+    },
+  },
+} as const;
 
 export function registerAiCommands(program: Command, getClient: () => MetaClient): void {
   const ai = program.command('ai').description('AI-powered performance scoring, anomaly detection, and recommendations');
@@ -126,58 +163,128 @@ export function registerAiCommands(program: Command, getClient: () => MetaClient
 
   ai
     .command('recommendations')
-    .description('Get AI-powered optimization recommendations for an account')
+    .description('Get AI-powered optimization recommendations for an account (LLM-backed when available)')
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
     .option('--type <type>', 'Recommendation type: performance, budget, creative, audience', 'performance')
+    .option('--time-range <range>', 'Time range for insights', 'last_30d')
+    .option('--no-llm', 'Skip the LLM and use rule-based heuristics only')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
       const client = getClient();
 
-      // Get active campaigns with insights
-      const campaignParams: Record<string, string> = {
-        fields: 'id,name,objective,status,daily_budget,bid_strategy',
-        effective_status: JSON.stringify(['ACTIVE']),
-        limit: '50',
-      };
-      const campaignsResponse = await client.request(`${opts.accountId}/campaigns`, { params: campaignParams });
+      // 1. Active campaigns.
+      const campaignsResponse = await client.request(`${opts.accountId}/campaigns`, {
+        params: {
+          fields: 'id,name,objective,status,daily_budget,lifetime_budget,bid_strategy',
+          effective_status: JSON.stringify(['ACTIVE']),
+          limit: '50',
+        },
+      });
       const campaigns = (campaignsResponse.data as Record<string, unknown>).data as Array<Record<string, unknown>> || [];
 
-      const recommendations: unknown[] = [];
-
-      for (const campaign of campaigns.slice(0, 10)) {
+      // 2. Per-campaign insights (cap at 15 to bound API calls).
+      const enriched: Array<Record<string, unknown>> = [];
+      for (const campaign of campaigns.slice(0, 15)) {
         const insightParams: Record<string, string> = {
-          fields: 'impressions,clicks,spend,cpc,cpm,ctr,frequency,actions',
+          fields: 'impressions,clicks,spend,cpc,cpm,ctr,frequency,reach,actions,cost_per_action_type',
         };
+        const tr = resolveTimeRange(opts.timeRange);
+        if (tr) insightParams.time_range = tr;
         const insightResponse = await client.request(`${campaign.id}/insights`, { params: insightParams });
         const insight = ((insightResponse.data as Record<string, unknown>).data as unknown[])?.[0] as Record<string, unknown> || {};
+        const leads = actionValue(insight.actions, 'offsite_conversion.fb_pixel_lead', 'lead', 'omni_complete_registration');
+        const purchases = actionValue(insight.actions, 'offsite_conversion.fb_pixel_purchase', 'purchase');
+        const spend = parseFloat(String(insight.spend || 0));
+        enriched.push({
+          campaign_id: campaign.id,
+          name: campaign.name,
+          objective: campaign.objective,
+          bid_strategy: campaign.bid_strategy || null,
+          daily_budget_cents: campaign.daily_budget || null,
+          impressions: parseFloat(String(insight.impressions || 0)),
+          spend,
+          ctr: parseFloat(String(insight.ctr || 0)),
+          cpc: parseFloat(String(insight.cpc || 0)),
+          cpm: parseFloat(String(insight.cpm || 0)),
+          frequency: parseFloat(String(insight.frequency || 0)),
+          leads: leads ?? null,
+          cost_per_lead: leads ? Number((spend / leads).toFixed(2)) : null,
+          purchases: purchases ?? null,
+          cost_per_purchase: purchases ? Number((spend / purchases).toFixed(2)) : null,
+        });
+      }
 
-        const ctr = parseFloat(String(insight.ctr || 0));
-        const cpc = parseFloat(String(insight.cpc || 0));
-        const frequency = parseFloat(String(insight.frequency || 0));
+      // 3. Account-relative benchmarks (context layer).
+      const benchmarks = computeBenchmarks(enriched);
 
-        const recs: string[] = [];
-        if (ctr < 0.5) recs.push('Very low CTR — consider testing new ad creatives');
-        if (cpc > 5) recs.push('High CPC — try broader targeting or lower-funnel optimization');
-        if (frequency > 4) recs.push('High frequency — audience may be saturated');
-        if (!campaign.bid_strategy || campaign.bid_strategy === 'LOWEST_COST_WITHOUT_CAP') {
-          recs.push('No bid cap — consider COST_CAP for better cost control');
-        }
+      // Annotate each campaign vs the account distribution.
+      for (const e of enriched) {
+        const ctrC = classify(e.ctr as number, benchmarks.metrics.ctr, false);
+        const cpcC = classify(e.cpc as number, benchmarks.metrics.cpc, LOWER_IS_BETTER.has('cpc'));
+        e.ctr_vs_account = `${ctrC.label} (${ctrC.vsMedian})`;
+        e.cpc_vs_account = `${cpcC.label} (${cpcC.vsMedian})`;
+      }
 
-        if (recs.length > 0) {
-          recommendations.push({
-            campaign_id: campaign.id,
-            campaign_name: campaign.name,
-            recommendations: recs,
-            metrics: { ctr, cpc, frequency },
-          });
+      const useLlm = opts.llm !== false && isLlmAvailable();
+
+      // 4a. LLM-backed reasoning (preferred).
+      if (useLlm) {
+        const system = 'You are a senior Meta Ads strategist. You are given an advertiser\'s active '
+          + 'campaigns with last-period performance and account-relative benchmarks (each metric '
+          + 'annotated vs the account median). Produce prioritized, specific, actionable '
+          + 'recommendations. Ground every rationale in the actual numbers and benchmarks provided. '
+          + 'Be concrete (name the campaign, cite the metric). Do not invent data not present. '
+          + 'Focus area: ' + String(opts.type) + '.';
+        const userContent = JSON.stringify({
+          account_id: opts.accountId,
+          time_range: opts.timeRange,
+          benchmarks,
+          campaigns: enriched,
+        }, null, 2);
+
+        try {
+          const result = await reasonStructured<{ summary: string; recommendations: unknown[] }>(
+            system, userContent, { schema: RECS_SCHEMA as unknown as Record<string, unknown>, maxTokens: 4000 },
+          );
+          console.log(formatOutput({
+            account_id: opts.accountId,
+            recommendation_type: opts.type,
+            engine: `llm:${llmProviderLabel()}`,
+            time_range: opts.timeRange,
+            campaigns_analyzed: enriched.length,
+            benchmarks,
+            summary: result.summary,
+            recommendations: result.recommendations,
+          }, opts.output as OutputFormat));
+          return;
+        } catch (err) {
+          console.error(`LLM analysis failed (${(err as Error).message}); falling back to heuristics.`);
         }
       }
+
+      // 4b. Rule-based fallback (no key, --no-llm, or LLM error).
+      const recommendations = enriched
+        .map((e) => {
+          const recs: string[] = [];
+          const ctr = e.ctr as number, cpc = e.cpc as number, frequency = e.frequency as number;
+          if (ctr < 0.5) recs.push('Very low CTR — test new ad creatives');
+          if (cpc > 5) recs.push('High CPC — try broader targeting or lower-funnel optimization');
+          if (frequency > 4) recs.push('High frequency — audience may be saturated; refresh creative or expand');
+          if (!e.bid_strategy || e.bid_strategy === 'LOWEST_COST_WITHOUT_CAP') {
+            recs.push('No bid cap — consider COST_CAP for cost control');
+          }
+          return recs.length ? { campaign: e.name, metrics: { ctr, cpc, frequency }, recommendations: recs } : null;
+        })
+        .filter(Boolean);
 
       console.log(formatOutput({
         account_id: opts.accountId,
         recommendation_type: opts.type,
-        total_campaigns_analyzed: campaigns.length,
+        engine: 'heuristic',
+        time_range: opts.timeRange,
+        campaigns_analyzed: enriched.length,
+        benchmarks,
         recommendations,
       }, opts.output as OutputFormat));
     }));

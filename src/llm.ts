@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { execSync } from 'node:child_process';
 import logger from './logger.js';
 
 /**
@@ -165,21 +166,104 @@ class OpenAICompatibleProvider implements LlmProvider {
   }
 }
 
+// ─── Claude CLI provider (local `claude` binary, no API key) ──────────────────
+
+function claudeCliPath(): string | undefined {
+  // Honor an explicit override; otherwise probe for a `claude` on PATH.
+  const explicit = process.env.META_ADS_CLI_CLAUDE_BIN;
+  if (explicit) return explicit;
+  try {
+    const found = execSync('command -v claude', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return found || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+class ClaudeCliProvider implements LlmProvider {
+  readonly name = 'claude-cli';
+  readonly model: string;
+  private bin: string;
+
+  constructor() {
+    const bin = claudeCliPath();
+    if (!bin) throw new Error('No `claude` CLI found on PATH.');
+    this.bin = bin;
+    // Default to Sonnet — it's available via the local subscription with no API key.
+    this.model = process.env.META_ADS_CLI_CLAUDE_MODEL || 'claude-sonnet-4-5';
+  }
+
+  async reasonStructured<T = unknown>(system: string, userContent: string, opts: ReasonOptions): Promise<T> {
+    const { spawn } = await import('node:child_process');
+    logger.info(`LLM(claude-cli) model=${this.model} bin=${this.bin}`);
+
+    // The CLI has no structured-output param, so instruct the model to emit
+    // JSON matching the schema and parse it from the result envelope.
+    const prompt = `${system}\n\n${userContent}\n\n`
+      + `Respond with ONLY a single JSON object that conforms to this JSON Schema. `
+      + `No markdown, no code fences, no prose:\n${JSON.stringify(opts.schema)}`;
+
+    const stdout = await new Promise<string>((resolve, reject) => {
+      const child = spawn(this.bin, [
+        '-p', prompt,
+        '--model', this.model,
+        '--output-format', 'json',
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { err += d; });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code === 0) resolve(out);
+        else reject(new Error(`claude CLI exited ${code}: ${err.slice(0, 300)}`));
+      });
+    });
+
+    // --output-format json wraps the reply: { result: "<text>", ... }
+    let text: string;
+    try {
+      const envelope = JSON.parse(stdout) as { result?: string; is_error?: boolean };
+      if (envelope.is_error) throw new Error('claude CLI reported an error result.');
+      text = (envelope.result ?? '').trim();
+    } catch {
+      text = stdout.trim(); // fall back to raw stdout if envelope parsing fails
+    }
+
+    // The model may still wrap JSON in ```fences``` — strip them.
+    const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/.exec(text);
+    const jsonText = fenced ? fenced[1] : text;
+    return JSON.parse(jsonText) as T;
+  }
+}
+
 // ─── Provider selection ───────────────────────────────────────────────────────
 
-function selectProviderName(): 'anthropic' | 'openai-compatible' | undefined {
+function selectProviderName(): 'anthropic' | 'openai-compatible' | 'claude-cli' | undefined {
   const explicit = (process.env.META_ADS_CLI_LLM_PROVIDER || '').toLowerCase().trim();
   if (explicit === 'anthropic' || explicit === 'claude') return 'anthropic';
   if (explicit === 'openai-compatible' || explicit === 'openai') return 'openai-compatible';
+  if (explicit === 'claude-cli' || explicit === 'cli') return 'claude-cli';
   if (explicit) return undefined; // unknown value → treat as unconfigured
-  // Auto-detect: prefer Anthropic, fall back to OpenAI-compatible.
+  // Auto-detect: prefer an explicit API key, then fall back to the local CLI.
   if (anthropicKey()) return 'anthropic';
   if (openaiKey()) return 'openai-compatible';
+  if (claudeCliPath()) return 'claude-cli';
   return undefined;
 }
 
 export function isLlmAvailable(): boolean {
   return selectProviderName() !== undefined;
+}
+
+/** Human-readable label for the provider that would be used (for diagnostics). */
+export function llmProviderLabel(): string {
+  const name = selectProviderName();
+  if (!name) return 'none';
+  if (name === 'claude-cli') return `claude-cli (${process.env.META_ADS_CLI_CLAUDE_MODEL || 'claude-sonnet-4-5'}, no key)`;
+  if (name === 'anthropic') return `anthropic (${process.env.META_ADS_CLI_ANTHROPIC_MODEL || DEFAULT_ANTHROPIC_MODEL})`;
+  return `openai-compatible (${process.env.META_ADS_CLI_LLM_MODEL || 'gpt-4o'})`;
 }
 
 let cached: LlmProvider | null = null;
@@ -189,12 +273,14 @@ export function getProvider(): LlmProvider {
   const name = selectProviderName();
   if (!name) {
     throw new Error(
-      'No LLM provider configured. Set ANTHROPIC_API_KEY (Claude, recommended) or '
-      + 'META_ADS_CLI_LLM_API_KEY + META_ADS_CLI_LLM_BASE_URL (any OpenAI-compatible endpoint) '
-      + 'to enable AI-backed analysis. Get a Claude key at https://console.anthropic.com/.'
+      'No LLM provider configured. Use the local `claude` CLI (no key needed), or set '
+      + 'ANTHROPIC_API_KEY, or META_ADS_CLI_LLM_API_KEY + META_ADS_CLI_LLM_BASE_URL '
+      + '(any OpenAI-compatible endpoint) to enable AI-backed analysis.'
     );
   }
-  cached = name === 'anthropic' ? new AnthropicProvider() : new OpenAICompatibleProvider();
+  cached = name === 'anthropic' ? new AnthropicProvider()
+    : name === 'openai-compatible' ? new OpenAICompatibleProvider()
+      : new ClaudeCliProvider();
   return cached;
 }
 

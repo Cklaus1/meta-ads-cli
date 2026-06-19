@@ -3,7 +3,7 @@ import { AuthManager } from '../auth.js';
 import { MetaClient, API_VERSION } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
-import { isLlmAvailable } from '../llm.js';
+import { isLlmAvailable, llmProviderLabel } from '../llm.js';
 
 type CheckStatus = 'ok' | 'warn' | 'fail' | 'info';
 
@@ -220,12 +220,10 @@ export function registerDoctorCommand(
 
       // ── 7. LLM (AI features) configuration ─────────────────────────────────
       if (isLlmAvailable()) {
-        const provider = process.env.META_ADS_CLI_LLM_PROVIDER
-          || (process.env.META_ADS_CLI_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN ? 'anthropic' : 'openai-compatible');
         checks.push({
           name: 'AI provider',
           status: 'ok',
-          detail: `Configured (${provider}) — "meta-ads ai recommendations" will use LLM reasoning.`,
+          detail: `Configured (${llmProviderLabel()}) — "meta-ads ai recommendations" will use LLM reasoning.`,
         });
       } else {
         checks.push({
