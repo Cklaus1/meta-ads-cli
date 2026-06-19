@@ -187,10 +187,10 @@ export function registerDoctorCommand(
         fix: 'Plan migrations for any legacy Advantage+ Shopping/App campaigns and reach-based reporting.',
       });
 
-      // ── 6. Default account access ──────────────────────────────────────────
+      // ── 6. Default account access + rate-limit usage ───────────────────────
       if (tokenValid && opts.accountId) {
+        const client = getClient();
         try {
-          const client = getClient();
           const resp = await client.request(`${opts.accountId}`, {
             params: { fields: 'name,account_status,currency' },
           });
@@ -201,6 +201,18 @@ export function registerDoctorCommand(
             status: active ? 'ok' : 'warn',
             detail: `${opts.accountId} — ${acct.name ?? '(unknown)'}${acct.currency ? `, ${acct.currency}` : ''}${active ? '' : ` (status ${acct.account_status}, not active)`}`,
           });
+
+          // Rate-limit usage from the live response headers.
+          const usage = client.getUsage();
+          if (usage.peakPct > 0) {
+            const status: CheckStatus = usage.peakPct >= 90 ? 'fail' : usage.peakPct >= 75 ? 'warn' : 'ok';
+            checks.push({
+              name: 'Rate-limit usage',
+              status,
+              detail: `${usage.peakPct}% of limit (${usage.detail})${usage.estimatedRecoverSec ? `, ~${Math.round(usage.estimatedRecoverSec / 60)}m to recover` : ''}.`,
+              fix: status === 'ok' ? undefined : 'Slow large pulls with --page-delay; the client also auto-throttles above 75%.',
+            });
+          }
         } catch (err) {
           checks.push({
             name: 'Default account',

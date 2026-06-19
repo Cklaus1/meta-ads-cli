@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { MetaClient } from '../../src/meta-client.js';
+import { MetaClient, parseUsageHeaders } from '../../src/meta-client.js';
 
 // Mock the logger to suppress output
 vi.mock('../../src/logger.js', () => ({
@@ -29,6 +29,39 @@ describe('MetaClient', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  describe('parseUsageHeaders', () => {
+    it('returns zero usage when headers are missing', () => {
+      expect(parseUsageHeaders(undefined).peakPct).toBe(0);
+    });
+
+    it('parses X-App-Usage and reports the peak gauge', () => {
+      const h = new Headers({ 'x-app-usage': JSON.stringify({ call_count: 20, total_time: 65, total_cputime: 10 }) });
+      const u = parseUsageHeaders(h);
+      expect(u.peakPct).toBe(65);
+      expect(u.detail).toContain('total_time');
+    });
+
+    it('parses business-use-case usage with recovery estimate', () => {
+      const h = new Headers({
+        'x-business-use-case-usage': JSON.stringify({
+          '123': [{ type: 'ads_management', call_count: 10, total_time: 81, estimated_time_to_regain_access: 32 }],
+        }),
+      });
+      const u = parseUsageHeaders(h);
+      expect(u.peakPct).toBe(81);
+      expect(u.estimatedRecoverSec).toBe(32 * 60);
+    });
+
+    it('takes the max across multiple headers', () => {
+      const h = new Headers({
+        'x-app-usage': JSON.stringify({ call_count: 30 }),
+        'x-ad-account-usage': JSON.stringify({ acc_id_util_pct: 95 }),
+      });
+      // ad-account-usage uses a different key shape; app-usage call_count wins here
+      expect(parseUsageHeaders(h).peakPct).toBe(30);
+    });
   });
 
   describe('buildUrl', () => {
@@ -297,17 +330,33 @@ describe('MetaClient', () => {
       expect(result.status).toBe(200);
     });
 
-    it('exhausts retries and throws on persistent 429', async () => {
+    it('throws a rate-limit error on a persistent rate-limit error code', async () => {
+      // code 4 is a Meta app-level rate-limit code; the client recognizes it
+      // (regardless of HTTP status) and surfaces a clear rate-limit message
+      // once the auto-wait budget is exhausted.
       vi.spyOn(globalThis, 'fetch').mockResolvedValue({
         ok: false,
         status: 429,
+        headers: new Headers(),
         text: () => Promise.resolve(JSON.stringify({ error: { message: 'Rate limited', code: 4 } })),
       } as Response);
 
       vi.spyOn(console, 'error').mockImplementation(() => {});
 
-      // On the last attempt for 429, it falls through to error handling
-      await expect(client.request('me')).rejects.toThrow('Meta API error (429)');
+      await expect(client.request('me')).rejects.toThrow('Meta rate limit reached');
+    });
+
+    it('throws a generic API error for a persistent non-rate-limit 4xx', async () => {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 400,
+        headers: new Headers(),
+        text: () => Promise.resolve(JSON.stringify({ error: { message: 'Bad field', code: 100 } })),
+      } as Response);
+
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await expect(client.request('me')).rejects.toThrow('Meta API error (400)');
     });
   });
 

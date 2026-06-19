@@ -6,6 +6,15 @@ const MAX_RETRIES = 3;
 const MAX_PAGES = 100;
 export const API_VERSION = 'v25.0';
 
+// Meta reports usage as a percentage (0–100) of each rate-limit budget via the
+// X-Business-Use-Case-Usage / X-Ad-Account-Usage / X-App-Usage headers. When any
+// gauge crosses this threshold we proactively slow down to avoid a hard throttle.
+const USAGE_SOFT_THRESHOLD = Number(process.env.META_ADS_CLI_USAGE_THRESHOLD) || 75;
+// Meta error codes for ads/app rate limiting (returned as HTTP 400/403, NOT 429).
+const RATE_LIMIT_CODES = new Set([4, 17, 32, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006, 80008, 80014]);
+// Cap how long we'll auto-wait on a throttle that reports a recovery estimate.
+const MAX_AUTO_WAIT_MS = Number(process.env.META_ADS_CLI_MAX_WAIT_MS) || 90_000;
+
 export interface MetaRequestOptions {
   method?: string;
   params?: Record<string, string>;
@@ -18,12 +27,70 @@ export interface MetaResponse {
   nextCursor?: string;
 }
 
+/** Peak usage percentage (0–100) seen across rate-limit gauges on a response. */
+interface UsageSnapshot {
+  peakPct: number;
+  detail: string;
+  estimatedRecoverSec?: number;
+}
+
+/**
+ * Parse Meta's rate-limit usage headers into a single peak-percentage snapshot.
+ * Headers carry JSON: X-App-Usage = {call_count, total_cputime, total_time};
+ * X-Business-Use-Case-Usage / X-Ad-Account-Usage are keyed by object id and may
+ * include estimated_time_to_regain_access (minutes) when already throttled.
+ */
+export function parseUsageHeaders(headers: Headers | undefined): UsageSnapshot {
+  let peak = 0;
+  let detail = '';
+  let recoverSec: number | undefined;
+
+  // Defensive: some environments / test mocks omit a real Headers object.
+  if (!headers || typeof headers.get !== 'function') {
+    return { peakPct: 0, detail: '' };
+  }
+
+  const consider = (label: string, obj: Record<string, unknown>) => {
+    for (const key of ['call_count', 'total_time', 'total_cputime']) {
+      const v = Number(obj[key]);
+      if (Number.isFinite(v) && v > peak) {
+        peak = v;
+        detail = `${label}.${key}=${v}%`;
+      }
+    }
+    const regain = Number(obj.estimated_time_to_regain_access);
+    if (Number.isFinite(regain) && regain > 0) recoverSec = regain * 60;
+  };
+
+  // X-App-Usage: a flat object.
+  const appUsage = headers.get('x-app-usage');
+  if (appUsage) {
+    try { consider('app', JSON.parse(appUsage)); } catch { /* ignore */ }
+  }
+  // Business-use-case + ad-account usage: { "<id>": [ {type, call_count, ...} ] }.
+  for (const h of ['x-business-use-case-usage', 'x-ad-account-usage']) {
+    const raw = headers.get(h);
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      for (const entries of Object.values(parsed)) {
+        const list = Array.isArray(entries) ? entries : [entries];
+        for (const e of list) consider(String((e as Record<string, unknown>).type || 'buc'), e as Record<string, unknown>);
+      }
+    } catch { /* ignore */ }
+  }
+
+  return { peakPct: peak, detail, estimatedRecoverSec: recoverSec };
+}
+
 export class MetaClient {
   private auth: AuthManager;
   private dryRun: boolean;
   private readOnly: boolean;
   private apiVersion: string;
   private baseUrl: string;
+  /** Most recent usage reading, for proactive throttling between calls. */
+  private lastUsage: UsageSnapshot = { peakPct: 0, detail: '' };
 
   constructor(auth: AuthManager, dryRun = false, apiVersion?: string, readOnly = false) {
     this.auth = auth;
@@ -31,6 +98,11 @@ export class MetaClient {
     this.readOnly = readOnly;
     this.apiVersion = apiVersion || process.env.META_ADS_CLI_API_VERSION || API_VERSION;
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
+  }
+
+  /** Expose the latest usage reading (for diagnostics / doctor). */
+  getUsage(): UsageSnapshot {
+    return this.lastUsage;
   }
 
   buildUrl(endpoint: string, params?: Record<string, string>): string {
@@ -72,6 +144,16 @@ export class MetaClient {
 
     let lastError: Error | null = null;
 
+    // Proactive throttle: if the previous response showed us near the limit,
+    // pause before issuing the next call to avoid tripping a hard block.
+    if (this.lastUsage.peakPct >= USAGE_SOFT_THRESHOLD) {
+      const over = this.lastUsage.peakPct - USAGE_SOFT_THRESHOLD;
+      const waitMs = Math.min(MAX_AUTO_WAIT_MS, 1000 + over * 400); // scales toward the cap as usage climbs
+      logger.warn(`Approaching rate limit (${this.lastUsage.detail}). Pausing ${(waitMs / 1000).toFixed(1)}s.`);
+      console.error(`Approaching Meta rate limit (${this.lastUsage.detail}). Pausing ${(waitMs / 1000).toFixed(1)}s...`);
+      await sleep(waitMs);
+    }
+
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       let response: Response;
 
@@ -94,11 +176,17 @@ export class MetaClient {
 
       logger.debug(`Response: ${response.status} ${response.statusText}`, { attempt });
 
-      // Rate limited — retry with backoff
+      // Record usage from this response for the next call's proactive throttle.
+      this.lastUsage = parseUsageHeaders(response.headers);
+      if (this.lastUsage.peakPct > 0) {
+        logger.debug(`Rate-limit usage: ${this.lastUsage.detail} (${this.lastUsage.peakPct}%)`);
+      }
+
+      // HTTP 429 — retry with exponential backoff.
       if (response.status === 429) {
         const waitMs = Math.pow(2, attempt) * 1000;
         if (attempt < MAX_RETRIES - 1) {
-          logger.warn(`Rate limited. Retrying in ${waitMs / 1000}s...`);
+          logger.warn(`Rate limited (429). Retrying in ${waitMs / 1000}s...`);
           console.error(`Rate limited. Retrying in ${waitMs / 1000}s...`);
           await sleep(waitMs);
           continue;
@@ -131,7 +219,32 @@ export class MetaClient {
       if (!response.ok || obj.error) {
         const errorObj = obj.error as Record<string, unknown> | undefined;
         const errorMessage = errorObj?.message || text;
-        const errorCode = errorObj?.code;
+        const errorCode = Number(errorObj?.code);
+        const errorSubcode = Number(errorObj?.error_subcode);
+
+        // Ads/app rate limiting arrives as HTTP 400/403 with a specific error
+        // code — NOT 429. Honor Meta's own recovery estimate when present,
+        // otherwise back off exponentially, and retry within the attempt budget.
+        if (RATE_LIMIT_CODES.has(errorCode)) {
+          const estMs = this.lastUsage.estimatedRecoverSec
+            ? this.lastUsage.estimatedRecoverSec * 1000
+            : Math.pow(2, attempt) * 2000;
+          const waitMs = Math.min(MAX_AUTO_WAIT_MS, estMs);
+          if (attempt < MAX_RETRIES - 1 && waitMs <= MAX_AUTO_WAIT_MS) {
+            const est = this.lastUsage.estimatedRecoverSec;
+            logger.warn(`Rate limited (code ${errorCode}). Waiting ${(waitMs / 1000).toFixed(0)}s${est ? ` (Meta estimate: ${Math.round(est / 60)}m)` : ''}.`);
+            console.error(`Rate limited by Meta. Waiting ${(waitMs / 1000).toFixed(0)}s before retry...`);
+            await sleep(waitMs);
+            continue;
+          }
+          // Recovery window exceeds what we'll auto-wait — surface it clearly.
+          const est = this.lastUsage.estimatedRecoverSec;
+          throw new Error(
+            `Meta rate limit reached (code ${errorCode}). `
+            + (est ? `Meta estimates ~${Math.round(est / 60)} minute(s) to regain access. ` : '')
+            + 'Slow down with --page-delay, or raise META_ADS_CLI_MAX_WAIT_MS to auto-wait longer.',
+          );
+        }
 
         logger.error(`API error ${response.status}: ${errorMessage}`);
 
@@ -141,6 +254,7 @@ export class MetaClient {
         if (response.status === 403 || errorCode === 200) {
           throw new Error(`Permission denied: ${errorMessage}`);
         }
+        void errorSubcode; // reserved for finer-grained handling
         throw new Error(`Meta API error (${response.status}): ${errorMessage}`);
       }
 
