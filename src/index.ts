@@ -16,6 +16,7 @@ import { registerLeadCommands } from './commands/leads.js';
 import { registerCatalogCommands } from './commands/catalog.js';
 import { registerBiddingCommands } from './commands/bidding.js';
 import { registerDuplicationCommands } from './commands/duplication.js';
+import { registerBackupCommands } from './commands/backup.js';
 import { registerAdsLibraryCommands } from './commands/ads-library.js';
 import { registerConversionCommands } from './commands/conversions.js';
 import { registerRetargetingCommands } from './commands/retargeting.js';
@@ -37,6 +38,7 @@ import { registerBrandedContentCommands } from './commands/branded-content.js';
 import { registerWebhookCommands } from './commands/webhooks.js';
 import { registerSetupCommand } from './commands/setup.js';
 import { registerProfileCommands } from './commands/profile.js';
+import { registerDoctorCommand } from './commands/doctor.js';
 import { applyProfile } from './profiles.js';
 import logger from './logger.js';
 
@@ -118,6 +120,7 @@ registerBiddingCommands(program, getClient);
 // Operations
 registerDuplicationCommands(program, getClient);
 registerBulkCommands(program, getClient);
+registerBackupCommands(program, getClient);
 
 // Analytics & Intelligence
 registerAdsLibraryCommands(program, getClient);
@@ -154,6 +157,7 @@ registerProfileCommands(program);
 registerSchemaCommands(program);
 registerGenerateSkillsCommand(program);
 registerSetupCommand(program, getAuth);
+registerDoctorCommand(program, getAuth, getClient);
 
 // Ensure auth is initialized before non-auth commands
 program.hook('preAction', async (thisCommand) => {
@@ -165,7 +169,7 @@ program.hook('preAction', async (thisCommand) => {
   }
 
   // Skip auth initialization for auth/setup/schema/generate-skills commands and dry-run
-  const skipAuth = ['auth', 'setup', 'schema', 'generate-skills', 'profile'];
+  const skipAuth = ['auth', 'setup', 'schema', 'generate-skills', 'profile', 'doctor'];
   if (skipAuth.some(s => commandChain.includes(s))) return;
   if (dryRun) return;
 
