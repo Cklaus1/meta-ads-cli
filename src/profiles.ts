@@ -12,6 +12,8 @@ export interface Profile {
   appId?: string;
   appSecret?: string;
   apiVersion?: string;
+  /** Cents ceiling on budget fields in writes (feeds the spend-cap guard). */
+  maxSpendCap?: number;
 }
 
 function ensureConfigDir(): void {
@@ -77,4 +79,8 @@ export function applyProfile(name: string): void {
   if (profile.appId) process.env.META_ADS_CLI_APP_ID = profile.appId;
   if (profile.appSecret) process.env.META_ADS_CLI_APP_SECRET = profile.appSecret;
   if (profile.apiVersion) process.env.META_ADS_CLI_API_VERSION = profile.apiVersion;
+  // Apply the profile's spend cap unless the env already sets one (explicit env wins).
+  if (profile.maxSpendCap !== undefined && process.env.META_ADS_CLI_MAX_SPEND_CAP === undefined) {
+    process.env.META_ADS_CLI_MAX_SPEND_CAP = String(profile.maxSpendCap);
+  }
 }

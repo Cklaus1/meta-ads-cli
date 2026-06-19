@@ -52,6 +52,7 @@ export function registerProfileCommands(program: Command): void {
     .option('--app-id <id>', 'Meta App ID')
     .option('--app-secret <secret>', 'Meta App Secret')
     .option('--api-version <version>', 'Graph API version')
+    .option('--spend-cap <cents>', 'Cents ceiling on budget fields in writes, stored with the profile (spend-cap guard)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       const p = getProfile(opts.name) || { name: opts.name };
@@ -61,6 +62,11 @@ export function registerProfileCommands(program: Command): void {
       if (opts.appId) p.appId = opts.appId;
       if (opts.appSecret) p.appSecret = opts.appSecret;
       if (opts.apiVersion) p.apiVersion = opts.apiVersion;
+      if (opts.spendCap !== undefined) {
+        const cents = Number(opts.spendCap);
+        if (!Number.isFinite(cents) || cents < 0) throw new Error('--spend-cap must be a non-negative number of cents');
+        p.maxSpendCap = cents;
+      }
 
       setProfile(p);
       console.log(formatOutput({ message: `Profile "${opts.name}" saved`, profile: { ...p, accessToken: p.accessToken ? `${p.accessToken.substring(0, 10)}...` : undefined, appSecret: p.appSecret ? '***' : undefined } }, opts.output as OutputFormat));
@@ -92,6 +98,7 @@ export function registerProfileCommands(program: Command): void {
       if (p.appId) console.log(`export META_ADS_CLI_APP_ID="${p.appId}"`);
       if (p.appSecret) console.log(`export META_ADS_CLI_APP_SECRET="${p.appSecret}"`);
       if (p.apiVersion) console.log(`export META_ADS_CLI_API_VERSION="${p.apiVersion}"`);
+      if (p.maxSpendCap !== undefined) console.log(`export META_ADS_CLI_MAX_SPEND_CAP="${p.maxSpendCap}"`);
       console.log(`\n# Or use inline: meta-ads --profile ${name} campaigns list`);
     }));
 }
