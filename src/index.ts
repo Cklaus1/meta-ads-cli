@@ -50,6 +50,7 @@ program
   .version('0.2.0')
   .option('--dry-run', 'Preview the API request without executing it')
   .option('--read-only', 'Restrict to read-only operations (block POST/DELETE)')
+  .option('--max-spend-cap <cents>', 'Block any write whose budget field (daily/lifetime/spend_cap/bid) exceeds this many cents')
   .option('--api-version <version>', 'Graph API version (default: v25.0)', 'v25.0')
   .option('--profile <name>', 'Use a named profile for credentials and account');
 
@@ -62,6 +63,14 @@ if (profileIdx !== -1 && process.argv[profileIdx + 1]) {
 // Determine flags from env or argv
 const dryRun = process.argv.includes('--dry-run');
 const readOnly = process.argv.includes('--read-only');
+
+// Extract --max-spend-cap value (cents); falls back to env in MetaClient.
+let maxSpendCapCents = 0;
+const capIdx = process.argv.indexOf('--max-spend-cap');
+if (capIdx !== -1 && process.argv[capIdx + 1]) {
+  const parsed = Number(process.argv[capIdx + 1]);
+  if (Number.isFinite(parsed) && parsed >= 0) maxSpendCapCents = parsed;
+}
 
 // Extract --api-version value
 let apiVersion = 'v25.0';
@@ -87,7 +96,7 @@ function getAuth(): AuthManager {
 function getClient(): MetaClient {
   if (!metaClient) {
     const auth = getAuth();
-    metaClient = new MetaClient(auth, dryRun, apiVersion, readOnly);
+    metaClient = new MetaClient(auth, dryRun, apiVersion, readOnly, maxSpendCapCents);
   }
   return metaClient;
 }

@@ -83,21 +83,59 @@ export function parseUsageHeaders(headers: Headers | undefined): UsageSnapshot {
   return { peakPct: peak, detail, estimatedRecoverSec: recoverSec };
 }
 
+// Budget-bearing fields (all in cents) that a write request could set. If any
+// exceeds the configured cap, the write is blocked before it leaves the client.
+const BUDGET_FIELDS = ['daily_budget', 'lifetime_budget', 'spend_cap', 'bid_amount'] as const;
+
 export class MetaClient {
   private auth: AuthManager;
   private dryRun: boolean;
   private readOnly: boolean;
   private apiVersion: string;
   private baseUrl: string;
+  /** Hard ceiling (in cents) on any budget field in a write. 0 = no cap. */
+  private maxSpendCapCents: number;
   /** Most recent usage reading, for proactive throttling between calls. */
   private lastUsage: UsageSnapshot = { peakPct: 0, detail: '' };
 
-  constructor(auth: AuthManager, dryRun = false, apiVersion?: string, readOnly = false) {
+  constructor(auth: AuthManager, dryRun = false, apiVersion?: string, readOnly = false, maxSpendCapCents = 0) {
     this.auth = auth;
     this.dryRun = dryRun;
     this.readOnly = readOnly;
     this.apiVersion = apiVersion || process.env.META_ADS_CLI_API_VERSION || API_VERSION;
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
+    const envCap = Number(process.env.META_ADS_CLI_MAX_SPEND_CAP);
+    this.maxSpendCapCents = maxSpendCapCents || (Number.isFinite(envCap) ? envCap : 0);
+  }
+
+  /**
+   * Enforce the spend-cap guard against a write body. Throws if any budget
+   * field exceeds the configured ceiling. No-op when no cap is set.
+   */
+  private enforceSpendCap(body: Record<string, string> | undefined): void {
+    if (!this.maxSpendCapCents || !body) return;
+    for (const field of BUDGET_FIELDS) {
+      const raw = body[field];
+      if (raw === undefined) continue;
+      const cents = Number(raw);
+      if (Number.isFinite(cents) && cents > this.maxSpendCapCents) {
+        throw new Error(
+          `Spend-cap guard: ${field}=${cents}¢ ($${(cents / 100).toFixed(2)}) exceeds the `
+          + `--max-spend-cap of ${this.maxSpendCapCents}¢ ($${(this.maxSpendCapCents / 100).toFixed(2)}). `
+          + 'Raise --max-spend-cap / META_ADS_CLI_MAX_SPEND_CAP, or lower the budget.',
+        );
+      }
+    }
+  }
+
+  /** Expose the latest usage reading (for diagnostics / doctor). */
+  getUsage(): UsageSnapshot {
+    return this.lastUsage;
+  }
+
+  /** Configured spend cap in cents (0 = disabled). */
+  getMaxSpendCapCents(): number {
+    return this.maxSpendCapCents;
   }
 
   /** Expose the latest usage reading (for diagnostics / doctor). */
@@ -121,6 +159,11 @@ export class MetaClient {
 
     if (this.readOnly && method !== 'GET') {
       throw new Error(`Read-only mode: ${method} requests are blocked. Remove --read-only to allow writes.`);
+    }
+
+    // Budget guard: validate before dry-run too, so the limit is caught while previewing.
+    if (method === 'POST') {
+      this.enforceSpendCap(options.body);
     }
 
     if (this.dryRun) {

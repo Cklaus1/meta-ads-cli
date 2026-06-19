@@ -100,6 +100,10 @@ Key conventions:
 | `META_ADS_CLI_ACCESS_TOKEN` | Direct access token (bypasses OAuth) |
 | `META_ADS_CLI_ACCOUNT_ID` | Default ad account ID for `--account-id` |
 | `META_ADS_CLI_API_VERSION` | Graph API version (default: v25.0) |
+| `META_ADS_CLI_MAX_SPEND_CAP` | Cents ceiling on budget fields in writes (`--max-spend-cap`); blocks over-budget creates/edits. Great for delegated/agent access |
+| `META_ADS_CLI_USAGE_THRESHOLD` | Rate-limit usage % (default 75) at which the client proactively throttles |
+| `META_ADS_CLI_MAX_WAIT_MS` | Max auto-wait on a rate-limit throttle (default 90000) |
+| `META_ADS_CLI_ANTHROPIC_API_KEY` / `ANTHROPIC_API_KEY` | Enable LLM-backed `ai` commands (else falls back to local `claude` CLI or heuristics) |
 | `META_ADS_CLI_LOG_LEVEL` | debug, info, warn, error, none |
 | `META_ADS_CLI_LOG_FILE` | Log file path (daily rotation) |
 

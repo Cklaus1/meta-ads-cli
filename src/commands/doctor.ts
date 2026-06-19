@@ -230,6 +230,26 @@ export function registerDoctorCommand(
         });
       }
 
+      // ── 6b. Safety guards (spend cap) ──────────────────────────────────────
+      {
+        const envCap = Number(process.env.META_ADS_CLI_MAX_SPEND_CAP);
+        const cap = Number.isFinite(envCap) ? envCap : 0;
+        if (cap > 0) {
+          checks.push({
+            name: 'Spend-cap guard',
+            status: 'ok',
+            detail: `Active — writes with a budget over ${cap}¢ ($${(cap / 100).toFixed(2)}) are blocked.`,
+          });
+        } else {
+          checks.push({
+            name: 'Spend-cap guard',
+            status: 'info',
+            detail: 'Not set — no budget ceiling enforced on writes.',
+            fix: 'Pass --max-spend-cap <cents> or set META_ADS_CLI_MAX_SPEND_CAP to cap budgets (great for delegated/agent access).',
+          });
+        }
+      }
+
       // ── 7. LLM (AI features) configuration ─────────────────────────────────
       if (isLlmAvailable()) {
         checks.push({

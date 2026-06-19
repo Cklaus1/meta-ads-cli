@@ -148,6 +148,44 @@ describe('MetaClient', () => {
     });
   });
 
+  describe('request - spend-cap guard', () => {
+    // signature: (auth, dryRun, apiVersion, readOnly, maxSpendCapCents)
+    it('blocks a write whose daily_budget exceeds the cap', async () => {
+      const capped = new MetaClient(auth, true, undefined, false, 10000); // $100 cap, dry-run
+      await expect(
+        capped.request('act_123/campaigns', { method: 'POST', body: { name: 'X', daily_budget: '50000' } })
+      ).rejects.toThrow('Spend-cap guard');
+    });
+
+    it('allows a write at or under the cap', async () => {
+      const capped = new MetaClient(auth, true, undefined, false, 10000);
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const result = await capped.request('act_123/campaigns', { method: 'POST', body: { name: 'X', daily_budget: '10000' } });
+      expect(result.data).toMatchObject({ dryRun: true });
+    });
+
+    it('checks lifetime_budget, spend_cap, and bid_amount too', async () => {
+      const capped = new MetaClient(auth, true, undefined, false, 5000);
+      for (const field of ['lifetime_budget', 'spend_cap', 'bid_amount']) {
+        await expect(
+          capped.request('act_123/adsets', { method: 'POST', body: { [field]: '9999999' } })
+        ).rejects.toThrow('Spend-cap guard');
+      }
+    });
+
+    it('does not interfere when no cap is set', async () => {
+      const uncapped = new MetaClient(auth, true);
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      const result = await uncapped.request('act_123/campaigns', { method: 'POST', body: { daily_budget: '9999999' } });
+      expect(result.data).toMatchObject({ dryRun: true });
+    });
+
+    it('reports the configured cap', () => {
+      expect(new MetaClient(auth, false, undefined, false, 2500).getMaxSpendCapCents()).toBe(2500);
+      expect(new MetaClient(auth).getMaxSpendCapCents()).toBe(0);
+    });
+  });
+
   describe('request - API responses', () => {
     it('returns parsed JSON on success', async () => {
       const responseData = { id: '123', name: 'My Campaign' };
