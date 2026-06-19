@@ -33,7 +33,7 @@ A standalone command-line tool for managing Facebook, Instagram, Threads & Whats
 - **Competitive intelligence** — Ads Library search, batch brand monitoring
 - **Cross-service workflows** — Campaign health checks, full audits, one-command launches
 - **Multi-format output** — JSON, table, CSV, text, YAML (`-o` flag)
-- **Safety** — `--dry-run`, `--read-only`, input validation
+- **Safety** — `--dry-run`, `--read-only`, `--max-spend-cap` budget guard, input validation
 - **Agent skills** — Generate SKILL.md files for Claude Code / OpenClaw agents
 
 ## Requirements
@@ -115,9 +115,13 @@ Token storage: OS keychain via `keytar`, fallback to `~/.config/meta-ads-cli/tok
 |------|-------------|
 | `--dry-run` | Preview API requests without executing |
 | `--read-only` | Block all POST/DELETE requests |
+| `--max-spend-cap <cents>` | Block any write whose budget exceeds this ceiling (see [docs/SPENDING_CAPS.md](docs/SPENDING_CAPS.md)) |
 | `--api-version <version>` | Graph API version (default: `v25.0`) |
 | `--profile <name>` | Use a named profile for credentials and account |
 | `-V, --version` | Show CLI version |
+
+For limiting spend risk with delegated or automated (agent) access, see
+**[docs/SPENDING_CAPS.md](docs/SPENDING_CAPS.md)**.
 
 ## Output Formats
 
