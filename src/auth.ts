@@ -11,16 +11,23 @@ const TOKEN_CACHE_ACCOUNT = 'meta-token-cache';
 
 const FALLBACK_TOKEN_PATH = path.join(CONFIG_DIR, 'token-cache.json');
 
+// The default is the ads-only set every Marketing API app supports. Asking
+// for permissions whose use case isn't added to the app makes Meta reject the
+// whole login ("Feature unavailable"), so Pages/Instagram/Messenger/catalog
+// permissions are opt-in via META_ADS_CLI_AUTH_EXTRA_SCOPES (or replace the
+// whole list with META_ADS_CLI_AUTH_SCOPES).
 export const AUTH_SCOPE = [
   'business_management', 'public_profile', 'ads_management', 'ads_read', 'read_insights', 'leads_retrieval',
-  'pages_show_list', 'pages_read_engagement', 'pages_manage_ads', 'pages_manage_posts', 'pages_manage_engagement',
-  'pages_manage_metadata', 'pages_messaging', 'instagram_basic', 'instagram_content_publish',
-  'instagram_manage_insights', 'catalog_management',
+  'pages_show_list', 'pages_read_engagement',
 ].join(',');
-// WhatsApp/Threads permissions need those products added to the app, so they
-// aren't requested by default. Override the whole list with this env var.
+export const OPTIONAL_SCOPES = [
+  'pages_manage_ads', 'pages_manage_posts', 'pages_manage_engagement', 'pages_manage_metadata', 'pages_messaging',
+  'instagram_basic', 'instagram_content_publish', 'instagram_manage_insights', 'catalog_management',
+];
 export function authScope(): string {
-  return process.env.META_ADS_CLI_AUTH_SCOPES || AUTH_SCOPE;
+  if (process.env.META_ADS_CLI_AUTH_SCOPES) return process.env.META_ADS_CLI_AUTH_SCOPES;
+  const extra = (process.env.META_ADS_CLI_AUTH_EXTRA_SCOPES || '').split(',').map(x => x.trim()).filter(Boolean);
+  return [AUTH_SCOPE, ...extra].join(',');
 }
 const AUTH_REDIRECT_URI = 'http://localhost:8899/callback';
 // Keychain calls go over D-Bus on Linux and can block for 25s+ when no
@@ -93,6 +100,8 @@ export class AuthManager {
   private apiVersion: string;
 
   constructor(apiVersion: string = API_VERSION) {
+    // Validated so it can't carry a path or query into OAuth/Graph URLs.
+    if (!/^v\d+\.\d+$/.test(apiVersion)) throw new Error(`Invalid API version "${apiVersion}". Use the form v26.0.`);
     this.apiVersion = apiVersion;
     this.appId = process.env.META_ADS_CLI_APP_ID
       || process.env.META_APP_ID

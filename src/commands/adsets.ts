@@ -623,20 +623,37 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       const changesTargeting = hasPlacement || hasHelpers || Boolean(opts.targetingAutomation) || advantageAudience !== undefined;
 
       let targeting: Record<string, unknown> = {};
-      if (opts.targeting) {
-        targeting = parseJsonInput(opts.targeting, '--targeting');
-      } else if (changesTargeting) {
-        // Meta replaces the whole targeting spec, so merge placements and
-        // automation into the current one instead of wiping geo/audiences.
-        const current = await client.request(adsetId, { params: { fields: 'targeting' } });
-        const existing = (current.data as { targeting?: Record<string, unknown> }).targeting;
-        if (existing) targeting = existing;
+      let campaignId: string | undefined;
+      // In dry-run the read is a stub, so a merged preview would look like the
+      // ad set's geo/audiences are being wiped. Preview only the changed keys.
+      const previewMerge = client.isDryRun() && !opts.targeting && changesTargeting;
+      if (opts.targeting || changesTargeting) {
+        if (!client.isDryRun()) {
+          const current = await client.request(adsetId, { params: { fields: 'targeting,campaign_id' } });
+          const data = current.data as { targeting?: Record<string, unknown>; campaign_id?: string };
+          campaignId = data.campaign_id;
+          // Meta replaces the whole targeting spec, so merge placements and
+          // automation into the current one instead of wiping geo/audiences.
+          if (!opts.targeting && data.targeting) targeting = data.targeting;
+        }
+        if (opts.targeting) targeting = parseJsonInput(opts.targeting, '--targeting');
       }
       Object.assign(targeting, placements);
       applyTargetingHelpers(targeting, opts);
       applyTargetingAutomation(targeting, opts.targetingAutomation, advantageAudience);
       assertNoRemovedPlacements(targeting);
-      if (opts.targeting || changesTargeting) body.targeting = JSON.stringify(targeting);
+      if (opts.targeting || changesTargeting) {
+        // Same checks as create: HEC-F ad sets need an explicit Advantage+
+        // audience setting, and EU-targeted ad sets get DSA defaults.
+        if (campaignId) await assertHecfAdvantageAudience(client, campaignId, targeting);
+        body.targeting = JSON.stringify(targeting);
+        if (!previewMerge) {
+          const dsaWarning = applyDsaDefaults(body, targeting);
+          if (dsaWarning) console.error(dsaWarning);
+        } else {
+          console.error('[dry-run] Targeting shows only the changed keys; the real update merges them into the ad set\'s current targeting.');
+        }
+      }
       if (opts.attributionSpec) body.attribution_spec = jsonOption(opts.attributionSpec, '--attribution-spec');
       if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);
       if (opts.dsaBeneficiary) body.dsa_beneficiary = opts.dsaBeneficiary;

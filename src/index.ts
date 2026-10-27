@@ -49,7 +49,7 @@ import { registerRuleCommands } from './commands/rules.js';
 import { registerPlanCommands } from './commands/plan.js';
 import { applyProfile, getDefaultProfileName } from './profiles.js';
 import { parseCents, validateAccountId } from './validate.js';
-import { API_VERSION, type ClientOptions } from './meta-client.js';
+import { API_VERSION, assertApiVersion, type ClientOptions } from './meta-client.js';
 import { CliError, ExitCode, UsageError, exitCodeFor, reportError, setErrorFormat } from './errors.js';
 import { loadPolicy } from './policy.js';
 import logger from './logger.js';
@@ -67,7 +67,7 @@ const program = new Command();
 program
   .name('meta-ads')
   .description('Meta Ads CLI - Manage Facebook & Instagram advertising via the Graph API')
-  .version('0.4.0')
+  .version('0.4.1')
   .option('--dry-run', 'Preview the API request without executing it (no API calls at all)')
   .option('--plan', 'Run reads for real but only record writes; prints the plan as JSON to stderr')
   .option('--validate', 'Send writes with validate_only so Meta checks them without applying anything')
@@ -97,6 +97,27 @@ function readArgvOption(name: string): string | undefined {
     if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
   }
   return undefined;
+}
+
+/** Every value given for a global option, in both `--name value` and `--name=value` forms. */
+function readAllArgvOptions(name: string): string[] {
+  const args = process.argv.slice(2);
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') break;
+    if (arg === name && args[i + 1] !== undefined) values.push(args[i + 1]);
+    else if (arg.startsWith(`${name}=`)) values.push(arg.slice(name.length + 1));
+  }
+  return values;
+}
+
+/** Commands that must work without the default profile (help, version, fixing profiles). */
+function skipsDefaultProfile(): boolean {
+  const args = process.argv.slice(2);
+  if (args.some(a => ['--help', '-h', '--version', '-V'].includes(a))) return true;
+  const first = args.find(a => !a.startsWith('-'));
+  return first === undefined || ['profile', 'help', 'completion'].includes(first);
 }
 
 // Global flags are resolved from Commander in the preAction hook, before any
@@ -146,9 +167,17 @@ async function main(): Promise<void> {
   const profileName = readArgvOption('--profile');
   if (profileName) {
     await applyProfile(profileName);
-  } else {
+  } else if (!skipsDefaultProfile()) {
     const defaultProfile = getDefaultProfileName();
-    if (defaultProfile) await applyProfile(defaultProfile, { onlyUnset: true });
+    if (defaultProfile) {
+      try {
+        await applyProfile(defaultProfile, { onlyUnset: true });
+      } catch (err) {
+        // A broken default profile mustn't lock out every command (including
+        // the ones needed to fix it); warn and carry on without it.
+        console.error(`Warning: default profile "${defaultProfile}" not applied: ${(err as Error).message}`);
+      }
+    }
   }
 
   // Register all command modules — Core CRUD
@@ -231,20 +260,30 @@ async function main(): Promise<void> {
     const globals = program.opts();
     dryRun = Boolean(globals.dryRun);
     readOnly = Boolean(globals.readOnly);
-    if (globals.apiVersion) apiVersion = globals.apiVersion;
+    // Read after the profile was applied, and validated so it can't carry a
+    // path or query string into the base URL.
+    apiVersion = assertApiVersion(globals.apiVersion || process.env.META_ADS_CLI_API_VERSION || API_VERSION);
+    // Every --max-spend-cap occurrence counts and the lowest wins, so a later
+    // (e.g. injected) occurrence can't raise an earlier one.
     try {
-      maxSpendCapCents = parseCents(globals.maxSpendCap, '--max-spend-cap') ?? 0;
+      const caps = readAllArgvOptions('--max-spend-cap').map(v => parseCents(v, '--max-spend-cap') ?? 0).filter(c => c > 0);
+      maxSpendCapCents = caps.length ? Math.min(...caps) : 0;
     } catch (err) {
       throw new UsageError((err as Error).message);
     }
+    // In an MCP tool subprocess, --allow-* only work if the server itself was
+    // started with them (passed down via env), so tool arguments can't unlock them.
+    const mcpChild = process.env.META_ADS_CLI_MCP_CHILD === '1';
+    const serverAllows = new Set((process.env.META_ADS_CLI_MCP_ALLOW || '').split(',').filter(Boolean));
+    const allowed = (flag: 'live' | 'delete' | 'messaging', value: unknown) => mcpChild ? serverAllows.has(flag) : Boolean(value);
     if (globals.plan && globals.dryRun) throw new UsageError('Use either --plan or --dry-run, not both');
     clientOptions = {
       plan: Boolean(globals.plan),
       validateOnly: Boolean(globals.validate),
       verbose: Boolean(globals.verbose),
-      allowLive: Boolean(globals.allowLive),
-      allowDelete: Boolean(globals.allowDelete),
-      allowMessaging: Boolean(globals.allowMessaging),
+      allowLive: allowed('live', globals.allowLive),
+      allowDelete: allowed('delete', globals.allowDelete),
+      allowMessaging: allowed('messaging', globals.allowMessaging),
     };
 
     // Normalize --account-id to the act_ form and reject anything else, so a

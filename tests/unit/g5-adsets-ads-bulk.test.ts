@@ -7,7 +7,7 @@ import {
   applyTargetingHelpers, applyDsaDefaults, significantEdits, insightsExpansion, attachPerformance,
 } from '../../src/commands/adsets.js';
 import { registerAdCommands, reviewReasons } from '../../src/commands/ads.js';
-import { registerBulkCommands, parseCsv, toCsv, diffRow, parseSetPairs } from '../../src/commands/bulk.js';
+import { registerBulkCommands, parseCsv, toCsv, diffRow, parseSetPairs, opHash } from '../../src/commands/bulk.js';
 import { registerTargetingCommands, targetingEntries } from '../../src/commands/targeting.js';
 import { mockClient, run } from './command-helpers.js';
 
@@ -85,7 +85,7 @@ describe('targeting helpers (MB-40, MB-44, G24)', () => {
 
   it('update merges helper flags into the current targeting', async () => {
     const { client, request } = mockClient(async (_e, o) => (
-      o?.params?.fields === 'targeting'
+      o?.params?.fields === 'targeting,campaign_id'
         ? { data: { targeting: { geo_locations: { countries: ['US'] }, age_min: 18 } }, status: 200 }
         : { data: { learning_stage_info: { status: 'SUCCESS' } }, status: 200 }
     ));
@@ -255,7 +255,7 @@ describe('bulk sheet round trip (G17)', () => {
     expect(() => parseSetPairs(['nope'])).toThrow('field=value');
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'g5-upd-'));
     const state = path.join(dir, 'state.json');
-    fs.writeFileSync(state, JSON.stringify({ done: ['1'] }));
+    fs.writeFileSync(state, JSON.stringify({ op_hash: opHash('update', { daily_budget: '5000' }), done: ['1'] }));
     const { client, request } = mockClient(async () => ({ data: { success: true }, status: 200 }));
     const { stdout } = await run(registerBulkCommands, client, ['bulk', 'update', '--ids', '1,2', '--set', 'daily_budget=5000', '--delay-ms', '0', '--state-file', state]);
     expect(posts(request).map(([e, o]) => [e, o.body])).toEqual([['2', { daily_budget: '5000' }]]);

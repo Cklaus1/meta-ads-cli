@@ -153,3 +153,18 @@ function normalCdf(x: number): number {
   const p = d * t * (0.3193815 + t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
   return 1 - p;
 }
+
+/**
+ * Minor units per major unit for a currency (100 for USD, 1 for JPY/KRW).
+ * Meta budgets are in the currency's minor unit, so convert with this
+ * instead of assuming cents.
+ */
+export function minorUnitFactor(currency: string | undefined): number {
+  if (!currency) return 100;
+  try {
+    const digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits;
+    return 10 ** (digits ?? 2);
+  } catch {
+    return 100;
+  }
+}

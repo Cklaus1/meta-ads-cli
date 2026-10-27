@@ -68,14 +68,14 @@ describe('mcp tools', () => {
   it('turns tool input into argv', () => {
     const tool = buildTools(makeProgram()).find(t => t.name === 'campaigns_update')!;
     expect(toolArgv(tool, { campaignId: '123', status: 'PAUSED', no_hash: true }, ['--read-only'], ['-o', 'json']))
-      .toEqual(['--read-only', 'campaigns', 'update', '123', '--status', 'PAUSED', '--no-hash', '-o', 'json']);
+      .toEqual(['--read-only', 'campaigns', 'update', '123', '--status=PAUSED', '--no-hash', '-o', 'json']);
     expect(optionProperty('-o, --output <format>')).toBe('output');
   });
 
   it('forwards guardrail globals', () => {
     const program = makeProgram();
     program.parse(['node', 'meta-ads', '--read-only', '--profile', 'client-a', 'accounts', 'list'], { from: 'node' });
-    expect(forwardedGlobals(program)).toEqual(['--read-only', '--profile', 'client-a']);
+    expect(forwardedGlobals(program)).toEqual(['--read-only', '--profile=client-a']);
   });
 });
 

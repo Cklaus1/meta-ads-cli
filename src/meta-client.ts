@@ -36,6 +36,38 @@ export interface MetaRequestOptions {
    * (execution_options=["validate_only"]). Also set for every write by --validate.
    */
   validateOnly?: boolean;
+  /**
+   * This POST only reads (e.g. starting an async insights report), so skip
+   * read-only/policy/plan/validate/journal handling for writes.
+   */
+  readLike?: boolean;
+  /** Journal id this write undoes (set by `journal undo`). */
+  undoOf?: string;
+}
+
+/** Graph API versions look like v26.0; anything else could smuggle a path or query into the base URL. */
+export function assertApiVersion(version: string): string {
+  if (!/^v\d+\.\d+$/.test(version)) {
+    throw new UsageError(`Invalid API version "${version}". Use the form v26.0.`);
+  }
+  return version;
+}
+
+/** Edges where Meta documents execution_options=["validate_only"]; other writes are skipped under --validate. */
+const VALIDATABLE_EDGES = new Set(['campaigns', 'adsets', 'ads', 'adcreatives', 'copies']);
+
+/** The method Graph will apply: a POST with method=DELETE (or similar) in its fields is that method. */
+export function effectiveMethod(method: string, fields: Record<string, string>): string {
+  const override = fields.method;
+  return typeof override === 'string' && override ? override.toUpperCase() : method.toUpperCase();
+}
+
+/** Placeholder ID prefix used by --plan and --validate for objects that weren't created. */
+export const PLACEHOLDER_PREFIX = 'planned_';
+
+/** True for IDs handed out by --plan/--validate instead of a real object ID. */
+export function isPlaceholderId(id: unknown): boolean {
+  return typeof id === 'string' && id.startsWith(PLACEHOLDER_PREFIX);
 }
 
 /** Client-wide modes and guardrails beyond the positional constructor args. */
@@ -161,6 +193,50 @@ export class MetaClient {
   private planned: PlannedWrite[] = [];
   /** Cache of object id → ad account (act_XXX), or null for non-ad objects. */
   private accountOf = new Map<string, string | null>();
+  /** Daily budgets approved by the account ceiling during this process. */
+  private approvedBudgets = new Map<string, number>();
+  private dryRunWrites = 0;
+  /** Serializes budget writes so parallel creates can't each pass the ceiling. */
+  private budgetLock: Promise<unknown> = Promise.resolve();
+
+  private async withBudgetLock<T>(fields: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+    const touchesBudget = this.policy.maxAccountDailyBudgetCents && (fields.daily_budget !== undefined
+      || STATUS_FIELDS.some(f => fields[f] === 'ACTIVE'));
+    if (!touchesBudget) return fn();
+    const run = this.budgetLock.then(fn, fn);
+    this.budgetLock = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
+   * Budget schedules raise a budget for a period: ABSOLUTE adds budget_value,
+   * MULTIPLIER scales it by budget_value percent. Check the resulting budget,
+   * not the increase, against the spend cap.
+   */
+  private async enforceBudgetSchedule(endpoint: string, fields: Record<string, string>): Promise<void> {
+    const segments = endpoint.split('/');
+    if (segments[segments.length - 1] !== 'budget_schedules' || fields.budget_value === undefined) return;
+    if (!this.maxSpendCapCents) return;
+    const value = Number(fields.budget_value);
+    if (!Number.isFinite(value)) throw new PolicyError(`Spend-cap guard: budget_value="${fields.budget_value}" is not a number.`);
+    let base = 0;
+    if (!this.dryRun) {
+      try {
+        const res = await this.execute(segments[0], 'GET', { params: { fields: 'daily_budget,lifetime_budget' } });
+        const d = res.data as { daily_budget?: string; lifetime_budget?: string };
+        base = Number(d.daily_budget || d.lifetime_budget || 0);
+      } catch (err) {
+        throw new PolicyError(`Spend-cap guard: couldn't read ${segments[0]}'s budget to check the schedule (${(err as Error).message}).`);
+      }
+    }
+    const resulting = fields.budget_value_type === 'MULTIPLIER' ? base * (1 + value / 100) : base + value;
+    if (resulting > this.maxSpendCapCents) {
+      throw new PolicyError(
+        `Spend-cap guard: this budget schedule would raise the budget to ${Math.round(resulting)}¢, `
+        + `over the spend cap of ${this.maxSpendCapCents}¢.`,
+      );
+    }
+  }
 
   constructor(auth: AuthManager, dryRun = false, apiVersion?: string, readOnly = false, maxSpendCapCents = 0, options: ClientOptions = {}) {
     this.auth = auth;
@@ -168,7 +244,7 @@ export class MetaClient {
     this.options = options;
     this.policy = options.policy ?? loadPolicy().policy;
     this.readOnly = readOnly || Boolean(this.policy.readOnly);
-    this.apiVersion = apiVersion || process.env.META_ADS_CLI_API_VERSION || API_VERSION;
+    this.apiVersion = assertApiVersion(apiVersion || process.env.META_ADS_CLI_API_VERSION || API_VERSION);
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
     // The strictest configured cap wins: a flag can lower the env/profile/policy
     // cap but never raise it.
@@ -226,6 +302,20 @@ export class MetaClient {
     return Boolean(this.options.plan);
   }
 
+  /** Whether --allow-live is in effect (false in MCP tool calls unless the server allowed it). */
+  isLiveAllowed(): boolean {
+    return Boolean(this.options.allowLive);
+  }
+
+  isValidateMode(): boolean {
+    return Boolean(this.options.validateOnly);
+  }
+
+  /** True when writes are not actually applied (--dry-run, --plan or --validate). */
+  isPreviewMode(): boolean {
+    return this.dryRun || this.isPlanMode() || this.isValidateMode();
+  }
+
   /** Raw rate-limit headers from the latest response. */
   getUsageHeaders(): Record<string, unknown> {
     return this.lastUsageHeaders;
@@ -247,8 +337,16 @@ export class MetaClient {
       const res = await this.execute(objectId, 'GET', { params: { fields: 'account_id' } });
       const id = (res.data as { account_id?: string }).account_id;
       account = id ? (String(id).startsWith('act_') ? String(id) : `act_${id}`) : null;
-    } catch {
-      account = null; // Pages, posts, catalogs etc. have no account_id.
+    } catch (err) {
+      // Pages, posts, catalogs etc. have no account_id field, and Meta
+      // answers with "nonexisting field" (code 100). Any other failure means
+      // we couldn't check, so the policy must not be skipped.
+      const e = err as { code?: number; message?: string };
+      const noField = e.code === 100 && /account_id/.test(e.message || '');
+      if (!noField) {
+        throw new PolicyError(`Policy: couldn't verify which ad account ${objectId} belongs to (${e.message || err}). Retry later.`);
+      }
+      account = null;
     }
     this.accountOf.set(objectId, account);
     return account;
@@ -258,7 +356,7 @@ export class MetaClient {
    * Enforce the policy file on a write: account allowlist, going live,
    * deletes, messaging, and the account-wide daily budget ceiling.
    */
-  private async enforcePolicy(endpoint: string, method: string, fields: Record<string, string>): Promise<void> {
+  private async enforcePolicy(endpoint: string, method: string, fields: Record<string, string>, placeholder?: string): Promise<void> {
     const p = this.policy;
     const segments = endpoint.split('/');
     const target = segments[0];
@@ -293,7 +391,7 @@ export class MetaClient {
 
     const needsAccount = (p.accountAllowlist && p.accountAllowlist.length > 0) || p.maxAccountDailyBudgetCents;
     if (!needsAccount) return;
-    if (this.dryRun) {
+    if (this.dryRun || placeholder) {
       if (!/^act_\d+$/.test(target)) {
         console.error('[dry-run] Policy account checks need a lookup and were skipped.');
       }
@@ -324,14 +422,16 @@ export class MetaClient {
     let current: { daily_budget?: string; effective_status?: string } = {};
     if (o.objectId) {
       try {
-        const res = await this.execute(o.objectId, 'GET', { params: { fields: 'daily_budget,effective_status' } });
+        const res = await this.execute(o.objectId, 'GET', { params: { fields: 'daily_budget,effective_status,configured_status' } });
         current = res.data as typeof current;
-      } catch {
-        current = {};
+      } catch (err) {
+        throw new PolicyError(`Policy: couldn't read ${o.objectId} to check the account daily budget ceiling (${(err as Error).message}).`);
       }
     }
+    const currentlyOn = current.effective_status === 'ACTIVE'
+      || (current as { configured_status?: string }).configured_status === 'ACTIVE';
     const endsActive = o.setsActive
-      || (o.isBareObject && !o.statusGiven && current.effective_status === 'ACTIVE')
+      || (o.isBareObject && !o.statusGiven && currentlyOn)
       || (o.createsDelivering && !o.statusGiven);
     if (!endsActive) return;
     const newBudget = Number(o.fields.daily_budget ?? current.daily_budget ?? 0);
@@ -340,15 +440,26 @@ export class MetaClient {
       throw new PolicyError(`Policy: can't tell which ad account ${o.endpoint} belongs to, so the account daily budget ceiling can't be checked.`);
     }
 
+    // Count everything that is switched on (or about to deliver), plus
+    // budgets this process already approved but Meta may not list yet.
     let total = 0;
+    const seen = new Set<string>();
     for (const edge of ['campaigns', 'adsets']) {
       const res = await this.requestAllPages(`${o.account}/${edge}`, {
-        params: { fields: 'id,daily_budget', effective_status: '["ACTIVE"]', limit: '500' },
+        params: {
+          fields: 'id,daily_budget,configured_status',
+          effective_status: '["ACTIVE","IN_PROCESS","WITH_ISSUES","PENDING_REVIEW","PREAPPROVED","PENDING_BILLING_INFO"]',
+          limit: '500',
+        },
       });
       for (const item of ((res.data as { data?: Array<{ id: string; daily_budget?: string }> }).data || [])) {
         if (item.id === o.objectId) continue;
+        seen.add(item.id);
         total += Number(item.daily_budget || 0);
       }
+    }
+    for (const [key, amount] of this.approvedBudgets) {
+      if (key !== o.objectId && !seen.has(key)) total += amount;
     }
     if (total + newBudget > cap) {
       throw new PolicyError(
@@ -356,6 +467,7 @@ export class MetaClient {
         + `($${((total + newBudget) / 100).toFixed(2)}), over the account ceiling of ${cap}¢ ($${(cap / 100).toFixed(2)}).`,
       );
     }
+    this.approvedBudgets.set(o.objectId ?? `pending:${this.approvedBudgets.size}`, newBudget);
   }
 
   /** Expose the latest usage reading (for diagnostics / doctor). */
@@ -408,17 +520,25 @@ export class MetaClient {
   }
 
   async request(endpoint: string, options: MetaRequestOptions = {}): Promise<MetaResponse> {
-    const method = options.method || 'GET';
     const baseUrl = options.baseUrl || this.baseUrl;
     try {
       validateEndpoint(endpoint);
     } catch (err) {
       throw new UsageError((err as Error).message);
     }
+    const fields = { ...(options.params || {}), ...(options.body || {}) };
+    // Graph treats a POST carrying method=DELETE as a delete, so guardrails
+    // and the journal must see the effective method.
+    const method = effectiveMethod(options.method || 'GET', fields);
 
     const first = endpoint.split('/')[0];
     if (/^act_\d+$/.test(first)) this.checkAccountAllowed(first, endpoint);
-    if (method === 'GET') {
+
+    // Objects that --plan/--validate only pretended to create can't be read
+    // or written; return a stub so multi-step workflows can continue.
+    const placeholder = endpoint.split('/').find(isPlaceholderId);
+    if (method === 'GET' || options.readLike) {
+      if (placeholder) return { data: { id: placeholder, planned: true, data: [] }, status: 0 };
       if (this.dryRun) return this.printDryRun(method, endpoint, options, baseUrl);
       return this.execute(endpoint, method, options);
     }
@@ -428,31 +548,45 @@ export class MetaClient {
     // previewing. Graph API reads query params on writes too, so check both.
     this.enforceSpendCap(options.body);
     this.enforceSpendCap(options.params);
-    const fields = { ...(options.params || {}), ...(options.body || {}) };
-    await this.enforcePolicy(endpoint, method, fields);
+    if (!placeholder) await this.enforceBudgetSchedule(endpoint, fields);
+    await this.withBudgetLock(fields, () => this.enforcePolicy(endpoint, method, fields, placeholder));
 
     if (this.dryRun) return this.printDryRun(method, endpoint, options, baseUrl);
 
-    if (this.options.plan) {
+    if (this.options.plan || placeholder) {
       const step = this.planned.length + 1;
-      this.planned.push({ step, method, endpoint, params: redact(options.params), body: redact(options.body) });
-      console.error(`[plan] ${step}. ${method} ${endpoint}${options.body ? ` ${JSON.stringify(redact(options.body))}` : ''}`);
+      if (this.options.plan || !this.options.validateOnly) {
+        this.planned.push({ step, method, endpoint, params: redact(options.params), body: redact(options.body) });
+      }
+      const label = this.options.plan ? 'plan' : 'validate';
+      const note = this.options.plan ? '' : ' skipped (depends on an object that was only validated, not created)';
+      console.error(`[${label}] ${step}. ${method} ${endpoint}${note}${options.body && this.options.plan ? ` ${JSON.stringify(redact(options.body))}` : ''}`);
       // A placeholder id lets later steps of a workflow reference this object.
-      return { data: { planned: true, id: `planned-${step}`, method, endpoint }, status: 0 };
+      return { data: { planned: true, id: `${PLACEHOLDER_PREFIX}${step}`, method, endpoint }, status: 0 };
     }
 
     const validateOnly = Boolean(options.validateOnly || this.options.validateOnly);
     if (validateOnly) {
-      if (method !== 'POST') {
-        console.error(`[validate] ${method} ${endpoint} skipped (Meta can only validate POST requests).`);
+      const edge = endpoint.split('/').length > 1 ? endpoint.split('/').pop()! : undefined;
+      const supported = method === 'POST' && (edge === undefined || VALIDATABLE_EDGES.has(edge));
+      if (!supported) {
+        console.error(`[validate] ${method} ${endpoint} skipped (Meta can't validate this request without applying it).`);
         return { data: { validated: false, skipped: true, method, endpoint }, status: 0 };
+      }
+      if (Object.values(fields).some(v => typeof v === 'string' && v.includes(PLACEHOLDER_PREFIX))) {
+        console.error(`[validate] ${method} ${endpoint} skipped (depends on an object that was only validated, not created).`);
+        const step = this.planned.length + 1;
+        return { data: { validated: false, skipped: true, id: `${PLACEHOLDER_PREFIX}${step}`, method, endpoint }, status: 0 };
       }
       const res = await this.execute(endpoint, method, {
         ...options,
         body: { ...(options.body || {}), execution_options: '["validate_only"]' },
       });
       console.error(`[validate] ${method} ${endpoint}: valid`);
-      return { data: { validated: true, method, endpoint, response: res.data }, status: res.status };
+      // A validated create returns no id; hand out a placeholder for later steps.
+      const step = this.planned.length + 1;
+      this.planned.push({ step, method, endpoint, params: redact(options.params), body: redact(options.body) });
+      return { data: { validated: true, id: `${PLACEHOLDER_PREFIX}${step}`, method, endpoint, response: res.data }, status: res.status };
     }
 
     if (!journalEnabled()) return this.execute(endpoint, method, options);
@@ -475,6 +609,7 @@ export class MetaClient {
     const entry = {
       id: newJournalId(), ts: new Date().toISOString(), method, endpoint,
       params: redact(options.params), body: redact(options.body), previous,
+      ...(options.undoOf ? { undo_of: options.undoOf } : {}),
     };
     try {
       const res = await this.execute(endpoint, method, options);
@@ -493,9 +628,12 @@ export class MetaClient {
     const url = this.buildUrl(endpoint, options.params, baseUrl);
     console.error(`[dry-run] ${method} ${url}`);
     if (options.body) {
-      console.error(`[dry-run] Body: ${JSON.stringify(options.body)}`);
+      console.error(`[dry-run] Body: ${JSON.stringify(redact(options.body))}`);
     }
-    return { data: { dryRun: true, method, endpoint }, status: 0 };
+    if (method === 'GET') return { data: { dryRun: true, method, endpoint }, status: 0 };
+    // Give writes a placeholder id so later workflow steps can reference them.
+    this.dryRunWrites += 1;
+    return { data: { dryRun: true, id: `${PLACEHOLDER_PREFIX}${this.dryRunWrites}`, method, endpoint }, status: 0 };
   }
 
   /** Send a request (with retries and error mapping), bypassing modes and policy. */
@@ -752,9 +890,10 @@ export class MetaClient {
     } catch (err) {
       throw new UsageError((err as Error).message);
     }
-    this.assertWritable('POST');
+    const uploadMethod = effectiveMethod('POST', fields);
+    this.assertWritable(uploadMethod);
     this.enforceSpendCap(fields);
-    await this.enforcePolicy(endpoint, 'POST', fields);
+    await this.enforcePolicy(endpoint, uploadMethod, fields);
 
     const fs = await import('fs');
     const stat = fs.statSync(filePath);
@@ -773,11 +912,12 @@ export class MetaClient {
       const step = this.planned.length + 1;
       this.planned.push({ step, method: 'POST', endpoint, body: redact(fields), file: filePath });
       console.error(`[plan] ${step}. POST ${endpoint} (upload ${filePath}, ${fileSize} bytes)`);
-      return { data: { planned: true, id: `planned-${step}`, method: 'POST', endpoint }, status: 0 };
+      return { data: { planned: true, id: `${PLACEHOLDER_PREFIX}${step}`, method: 'POST', endpoint }, status: 0 };
     }
     if (this.options.validateOnly) {
       console.error(`[validate] Upload to ${endpoint} skipped (uploads can't be validated without sending the file).`);
-      return { data: { validated: false, skipped: true, method: 'POST', endpoint }, status: 0 };
+      const step = this.planned.length + 1;
+      return { data: { validated: false, skipped: true, id: `${PLACEHOLDER_PREFIX}${step}`, method: 'POST', endpoint }, status: 0 };
     }
 
     const token = options.accessToken || await this.auth.getToken();

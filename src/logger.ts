@@ -14,7 +14,7 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 class Logger {
   private level: LogLevel;
   private logFile: string | null;
-  private stream: fs.WriteStream | null = null;
+  private fd: number | null = null;
 
   constructor() {
     this.level = (process.env.META_ADS_CLI_LOG_LEVEL as LogLevel) || 'none';
@@ -23,13 +23,14 @@ class Logger {
     if (this.logFile) {
       const dir = path.dirname(this.logFile);
       if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       }
       const date = new Date().toISOString().slice(0, 10);
       const ext = path.extname(this.logFile);
       const base = this.logFile.slice(0, -ext.length || undefined);
       const rotatedPath = `${base}-${date}${ext || '.log'}`;
-      this.stream = fs.createWriteStream(rotatedPath, { flags: 'a' });
+      // Synchronous appends: a process.exit right after logging must not lose lines.
+      this.fd = fs.openSync(rotatedPath, 'a', 0o600);
     }
   }
 
@@ -47,8 +48,8 @@ class Logger {
       ...(data !== undefined ? { data } : {}),
     };
 
-    if (this.stream) {
-      this.stream.write(JSON.stringify(entry) + '\n');
+    if (this.fd !== null) {
+      try { fs.writeSync(this.fd, JSON.stringify(entry) + '\n'); } catch { /* logging must not fail the command */ }
     }
 
     if (!this.logFile || level === 'warn' || level === 'error') {
@@ -80,9 +81,9 @@ class Logger {
   }
 
   close(): void {
-    if (this.stream) {
-      this.stream.end();
-      this.stream = null;
+    if (this.fd !== null) {
+      try { fs.closeSync(this.fd); } catch { /* already closed */ }
+      this.fd = null;
     }
   }
 }

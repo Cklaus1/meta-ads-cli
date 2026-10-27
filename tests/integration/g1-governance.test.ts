@@ -122,7 +122,7 @@ describe('plan and validate modes', () => {
     const c = new MetaClient(auth, false, undefined, false, 0, { plan: true });
     await c.request('act_1', { params: { fields: 'id' } });
     const created = await c.request('act_1/campaigns', { method: 'POST', body: { name: 'x', access_token: 'secret' } });
-    expect(created.data).toMatchObject({ planned: true, id: 'planned-1' });
+    expect(created.data).toMatchObject({ planned: true, id: 'planned_1' });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(c.getPlan()).toEqual([{ step: 1, method: 'POST', endpoint: 'act_1/campaigns', body: { name: 'x', access_token: '[redacted]' } }]);
   });

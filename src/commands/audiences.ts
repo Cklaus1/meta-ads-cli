@@ -5,6 +5,7 @@ import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 import { parseJsonInput } from '../json-input.js';
+import { normalizePii } from './conversions.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -22,19 +23,19 @@ const pad2 = (v: string) => v.replace(/\D/g, '').padStart(2, '0');
 // Per-key normalization before SHA-256 hashing (Meta's customer list rules).
 // Keys mapped to null are sent as-is (not hashed).
 const CUSTOMER_KEY_NORMALIZERS: Record<string, ((v: string) => string) | null> = {
-  EMAIL: v => v.trim().toLowerCase(),
-  PHONE: v => v.replace(/\D/g, '').replace(/^0+/, ''),
-  FN: v => v.trim().toLowerCase().replace(/[^\p{L}]/gu, ''),
-  LN: v => v.trim().toLowerCase().replace(/[^\p{L}]/gu, ''),
-  FI: v => v.trim().toLowerCase().charAt(0),
-  GEN: v => v.trim().toLowerCase().charAt(0),
-  DOBY: v => v.replace(/\D/g, ''),
+  EMAIL: normalizePii.email,
+  PHONE: normalizePii.phone,
+  FN: normalizePii.name,
+  LN: normalizePii.name,
+  FI: normalizePii.initial,
+  GEN: normalizePii.initial,
+  DOBY: normalizePii.digits,
   DOBM: pad2,
   DOBD: pad2,
-  CT: v => v.toLowerCase().replace(/[^\p{L}]/gu, ''),
-  ST: v => v.toLowerCase().replace(/[^a-z]/g, ''),
-  ZIP: v => v.toLowerCase().replace(/\s/g, ''),
-  COUNTRY: v => v.toLowerCase().replace(/[^a-z]/g, ''),
+  CT: normalizePii.city,
+  ST: normalizePii.state,
+  ZIP: normalizePii.zip,
+  COUNTRY: normalizePii.country,
   MADID: null,
   EXTERN_ID: null,
   LOOKALIKE_VALUE: null,

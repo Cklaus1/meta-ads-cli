@@ -124,6 +124,30 @@ export function assessFatigue(daily: Row[], lifetime: Row | undefined, event: st
   return { status, signals, launch, latest, lifetime_frequency: lifetimeFrequency };
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * Split daily rows into the latest `maxDays` calendar days and the same
+ * number of days before them, ending at the last date in the data. The
+ * window shrinks to half the covered span when there's less data.
+ */
+export function calendarWindows<T extends Record<string, unknown>>(daily: T[], maxDays: number): { window: number; before: T[]; after: T[] } {
+  const day = (r: T) => Date.parse(`${String(r.date_start)}T00:00:00Z`);
+  const days = daily.map(day).filter(Number.isFinite);
+  if (!days.length) return { window: 0, before: [], after: [] };
+  const first = Math.min(...days);
+  const last = Math.max(...days);
+  const span = Math.round((last - first) / DAY_MS) + 1;
+  const window = Math.max(1, Math.min(maxDays, Math.floor(span / 2)));
+  const afterStart = last - (window - 1) * DAY_MS;
+  const beforeStart = afterStart - window * DAY_MS;
+  return {
+    window,
+    after: daily.filter(r => day(r) >= afterStart),
+    before: daily.filter(r => day(r) >= beforeStart && day(r) < afterStart),
+  };
+}
+
 export function registerAnalyticsCommands(program: Command, getClient: () => MetaClient): void {
   const analytics = program.command('analytics').description('Performance trends, creative fatigue and asset analysis');
 
@@ -148,9 +172,11 @@ export function registerAnalyticsCommands(program: Command, getClient: () => Met
         return;
       }
       const event = eventOf(daily, opts.resultEvent);
-      const window = Math.min(7, Math.floor(daily.length / 2));
-      const before = aggregate(daily.slice(-2 * window, -window), event);
-      const after = aggregate(daily.slice(-window), event);
+      // Compare calendar windows: Meta omits days with no delivery, so taking
+      // the last N rows would compare windows of different lengths.
+      const { window, before: beforeRows, after: afterRows } = calendarWindows(daily, 7);
+      const before = aggregate(beforeRows, event);
+      const after = aggregate(afterRows, event);
       console.log(formatOutput({
         object_id: objectId,
         result_event: event,

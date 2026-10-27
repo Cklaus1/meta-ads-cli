@@ -1,8 +1,8 @@
 import { Command } from 'commander';
 import { readFileSync, writeFileSync } from 'fs';
-import { MetaClient, API_VERSION } from '../meta-client.js';
+import { MetaClient, API_VERSION, isPlaceholderId, PLACEHOLDER_PREFIX } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, PolicyError } from '../errors.js';
 import { applyAdsetBudgetSharing, BLOCKED_SMART_PROMOTION_TYPES } from './campaigns.js';
 
 function getDefaultAccountId(): string {
@@ -223,7 +223,9 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
 
       // Safety gate: require --yes for any live (non-dry-run) restore.
       // The MetaClient still enforces --read-only / --dry-run independently.
-      const dryRun = client.isDryRun();
+      // --dry-run, --plan and --validate create nothing live.
+      const dryRun = client.isPreviewMode();
+      const validating = client.isValidateMode();
       if (!opts.yes && !dryRun) {
         throw new Error(
           'Restore creates live objects. Re-run with --yes to confirm, or add --dry-run to preview. '
@@ -249,6 +251,9 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
         try {
           resp = await client.request(endpoint, { method: 'POST', body });
         } catch (err) {
+          // A spend cap, read-only or policy block applies to every object, so stop
+          // (exit 7) instead of recording it as an ordinary failure and going on.
+          if (err instanceof PolicyError) throw err;
           // Keep going: one bad object shouldn't hide what was already created.
           failures.push({ type, id: oldId, error: (err as Error).message });
           return null;
@@ -262,103 +267,128 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
         // parent→child cascade still previews (IDs are remapped end-to-end).
         if (dryRun) {
           created++;
-          return `dryrun_${++synthSeq}`;
+          return `${PLACEHOLDER_PREFIX}restore_${++synthSeq}`;
         }
         return null;
       }
 
-      // 1. Creatives first (ads reference them).
-      for (const c of snap.creatives) {
-        const body = pick(c, CREATIVE_CREATE);
-        if (!body.name) body.name = `Restored creative ${c.id}`;
-        const failedBefore = failures.length;
-        const newId = await create(`${accountId}/adcreatives`, body, 'creative', c.id);
-        if (newId) creativeMap[c.id] = newId;
-        else if (failures.length > failedBefore) failedCreatives.add(c.id);
-        else warnings.push(`Creative ${c.id} did not return an ID.`);
+      const report = (): void => {
+        console.log(formatOutput({
+          account_id: accountId,
+          dry_run: dryRun,
+          restored_status: status,
+          created_objects: created,
+          id_map: {
+            campaigns: campaignMap,
+            adsets: adsetMap,
+            creatives: creativeMap,
+          },
+          failed_objects: failures.length,
+          failures,
+          skipped_campaigns: skippedCampaigns,
+          warnings,
+        }, opts.output as OutputFormat));
+      };
+      // Under --validate, parents were only validated, so their children can't be checked.
+      const notValidated = (what: string, parentId: string): boolean => {
+        if (validating && isPlaceholderId(parentId)) {
+          warnings.push(`${what} not validated — its parent was only validated, not created.`);
+          return true;
+        }
+        return false;
+      };
+
+      try {
+        // 1. Creatives first (ads reference them).
+        for (const c of snap.creatives) {
+          const body = pick(c, CREATIVE_CREATE);
+          if (!body.name) body.name = `Restored creative ${c.id}`;
+          const failedBefore = failures.length;
+          const newId = await create(`${accountId}/adcreatives`, body, 'creative', c.id);
+          if (newId) creativeMap[c.id] = newId;
+          else if (failures.length > failedBefore) failedCreatives.add(c.id);
+          else warnings.push(`Creative ${c.id} did not return an ID.`);
+        }
+
+        // 2. Campaigns.
+        for (const camp of snap.campaigns) {
+          const promoType = String(camp.smart_promotion_type || '');
+          if (BLOCKED_SMART_PROMOTION_TYPES.has(promoType)) {
+            // Children are skipped below because the campaign has no new ID.
+            skippedCampaigns.push({ id: String(camp.id), name: String(camp.name ?? ''), smart_promotion_type: promoType });
+            warnings.push(
+              `Campaign ${camp.id} (${String(camp.name)}) skipped — it is an Advantage+ ${promoType === 'SMART_APP_PROMOTION' ? 'App' : 'Shopping'} `
+              + `campaign (${promoType}), which Meta no longer allows creating via the API. Recreate it as a standard campaign.`,
+            );
+            continue;
+          }
+          const body = pick(camp, CAMPAIGN_CREATE);
+          body.status = status;
+          if (!body.special_ad_categories) body.special_ad_categories = JSON.stringify(['NONE']);
+          applyAdsetBudgetSharing(body);
+          const failedBefore = failures.length;
+          const newId = await create(`${accountId}/campaigns`, body, 'campaign', camp.id);
+          if (newId) campaignMap[camp.id] = newId;
+          else if (failures.length === failedBefore) warnings.push(`Campaign ${camp.id} (${String(camp.name)}) did not return an ID.`);
+        }
+
+        // 3. Ad sets — remap campaign_id.
+        for (const adset of snap.adsets) {
+          const body = pick(adset, ADSET_CREATE);
+          body.status = status;
+          const oldCamp = String(adset.campaign_id || '');
+          const newCamp = campaignMap[oldCamp];
+          if (!newCamp) {
+            warnings.push(`Ad set ${adset.id} skipped — parent campaign ${oldCamp} not restored.`);
+            continue;
+          }
+          if (notValidated(`Ad set ${adset.id}`, newCamp)) continue;
+          body.campaign_id = newCamp;
+          const failedBefore = failures.length;
+          const newId = await create(`${accountId}/adsets`, body, 'adset', adset.id);
+          if (newId) adsetMap[adset.id] = newId;
+          else if (failures.length === failedBefore) warnings.push(`Ad set ${adset.id} (${String(adset.name)}) did not return an ID.`);
+        }
+
+        // 4. Ads — remap adset_id + creative.
+        for (const ad of snap.ads) {
+          const body = pick(ad, AD_CREATE);
+          body.status = status;
+          const oldAdset = String(ad.adset_id || '');
+          const newAdset = adsetMap[oldAdset];
+          if (!newAdset) {
+            warnings.push(`Ad ${ad.id} skipped — parent ad set ${oldAdset} not restored.`);
+            continue;
+          }
+          if (notValidated(`Ad ${ad.id}`, newAdset)) continue;
+          body.adset_id = newAdset;
+          const oldCreative = ad.creative?.id || ad.creative?.creative_id;
+          const newCreative = oldCreative ? creativeMap[oldCreative] : undefined;
+          if (newCreative && notValidated(`Ad ${ad.id}`, newCreative)) continue;
+          if (newCreative) {
+            body.creative = JSON.stringify({ creative_id: newCreative });
+          } else if (oldCreative) {
+            // Fall back to referencing the original creative ID (may still be valid).
+            body.creative = JSON.stringify({ creative_id: oldCreative });
+            warnings.push(failedCreatives.has(oldCreative)
+              ? `Ad ${ad.id}: creative ${oldCreative} failed to restore — referencing original ID.`
+              : `Ad ${ad.id}: creative ${oldCreative} not in snapshot — referencing original ID.`);
+          }
+          const failedBefore = failures.length;
+          const newId = await create(`${accountId}/ads`, body, 'ad', ad.id);
+          if (!newId && failures.length === failedBefore) warnings.push(`Ad ${ad.id} (${String(ad.name)}) did not return an ID.`);
+        }
+
+      } catch (err) {
+        if (err instanceof PolicyError) {
+          // Show what was created before the block, then exit with the policy code.
+          report();
+          console.error('Restore stopped: blocked by a spend cap, read-only mode or policy. Objects in id_map were created.');
+        }
+        throw err;
       }
 
-      // 2. Campaigns.
-      for (const camp of snap.campaigns) {
-        const promoType = String(camp.smart_promotion_type || '');
-        if (BLOCKED_SMART_PROMOTION_TYPES.has(promoType)) {
-          // Children are skipped below because the campaign has no new ID.
-          skippedCampaigns.push({ id: String(camp.id), name: String(camp.name ?? ''), smart_promotion_type: promoType });
-          warnings.push(
-            `Campaign ${camp.id} (${String(camp.name)}) skipped — it is an Advantage+ ${promoType === 'SMART_APP_PROMOTION' ? 'App' : 'Shopping'} `
-            + `campaign (${promoType}), which Meta no longer allows creating via the API. Recreate it as a standard campaign.`,
-          );
-          continue;
-        }
-        const body = pick(camp, CAMPAIGN_CREATE);
-        body.status = status;
-        if (!body.special_ad_categories) body.special_ad_categories = JSON.stringify(['NONE']);
-        applyAdsetBudgetSharing(body);
-        const failedBefore = failures.length;
-        const newId = await create(`${accountId}/campaigns`, body, 'campaign', camp.id);
-        if (newId) campaignMap[camp.id] = newId;
-        else if (failures.length === failedBefore) warnings.push(`Campaign ${camp.id} (${String(camp.name)}) did not return an ID.`);
-      }
-
-      // 3. Ad sets — remap campaign_id.
-      for (const adset of snap.adsets) {
-        const body = pick(adset, ADSET_CREATE);
-        body.status = status;
-        const oldCamp = String(adset.campaign_id || '');
-        const newCamp = campaignMap[oldCamp];
-        if (!newCamp) {
-          warnings.push(`Ad set ${adset.id} skipped — parent campaign ${oldCamp} not restored.`);
-          continue;
-        }
-        body.campaign_id = newCamp;
-        const failedBefore = failures.length;
-        const newId = await create(`${accountId}/adsets`, body, 'adset', adset.id);
-        if (newId) adsetMap[adset.id] = newId;
-        else if (failures.length === failedBefore) warnings.push(`Ad set ${adset.id} (${String(adset.name)}) did not return an ID.`);
-      }
-
-      // 4. Ads — remap adset_id + creative.
-      for (const ad of snap.ads) {
-        const body = pick(ad, AD_CREATE);
-        body.status = status;
-        const oldAdset = String(ad.adset_id || '');
-        const newAdset = adsetMap[oldAdset];
-        if (!newAdset) {
-          warnings.push(`Ad ${ad.id} skipped — parent ad set ${oldAdset} not restored.`);
-          continue;
-        }
-        body.adset_id = newAdset;
-        const oldCreative = ad.creative?.id || ad.creative?.creative_id;
-        const newCreative = oldCreative ? creativeMap[oldCreative] : undefined;
-        if (newCreative) {
-          body.creative = JSON.stringify({ creative_id: newCreative });
-        } else if (oldCreative) {
-          // Fall back to referencing the original creative ID (may still be valid).
-          body.creative = JSON.stringify({ creative_id: oldCreative });
-          warnings.push(failedCreatives.has(oldCreative)
-            ? `Ad ${ad.id}: creative ${oldCreative} failed to restore — referencing original ID.`
-            : `Ad ${ad.id}: creative ${oldCreative} not in snapshot — referencing original ID.`);
-        }
-        const failedBefore = failures.length;
-        const newId = await create(`${accountId}/ads`, body, 'ad', ad.id);
-        if (!newId && failures.length === failedBefore) warnings.push(`Ad ${ad.id} (${String(ad.name)}) did not return an ID.`);
-      }
-
-      console.log(formatOutput({
-        account_id: accountId,
-        dry_run: dryRun,
-        restored_status: status,
-        created_objects: created,
-        id_map: {
-          campaigns: campaignMap,
-          adsets: adsetMap,
-          creatives: creativeMap,
-        },
-        failed_objects: failures.length,
-        failures,
-        skipped_campaigns: skippedCampaigns,
-        warnings,
-      }, opts.output as OutputFormat));
+      report();
       if (failures.length > 0) {
         console.error(`Restore finished with ${failures.length} failure(s); see "failures". Objects in id_map were created.`);
         process.exitCode = 1;

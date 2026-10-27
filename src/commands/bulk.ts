@@ -1,8 +1,9 @@
 import { Command } from 'commander';
 import fs from 'fs';
+import crypto from 'crypto';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, UsageError } from '../errors.js';
 import { applyAdsetBudgetSharing } from './campaigns.js';
 import { insightsTimeParams } from '../time-range.js';
 import { parseJsonInput } from '../json-input.js';
@@ -26,20 +27,50 @@ function sleep(ms: number): Promise<void> {
 
 // ─── Resumable batches ──────────────────────────────────────────────────────
 
-/** IDs already processed in an earlier run, from a --state-file. */
-export function loadState(file: string | undefined): Set<string> {
-  if (!file || !fs.existsSync(file)) return new Set();
-  try {
-    const data = JSON.parse(fs.readFileSync(file, 'utf8')) as { done?: string[] };
-    return new Set(data.done || []);
-  } catch {
-    throw new Error(`--state-file ${file} is not a valid state file`);
-  }
+/** Identify an operation (command + what it sends) so a state file can't be reused for another one. */
+export function opHash(op: string, payload: unknown): string {
+  return crypto.createHash('sha256').update(`${op}\n${JSON.stringify(payload)}`).digest('hex').slice(0, 16);
 }
 
-function saveState(file: string | undefined, done: Set<string>): void {
+/**
+ * IDs already processed in an earlier run of the same operation, from a
+ * --state-file. Returns an empty set when there is no file. Throws when the
+ * file belongs to a different operation.
+ */
+export function loadState(file: string | undefined, hash: string): Set<string> {
+  if (!file || !fs.existsSync(file)) return new Set();
+  let data: { op_hash?: string; done?: string[] };
+  try {
+    data = JSON.parse(fs.readFileSync(file, 'utf8')) as { op_hash?: string; done?: string[] };
+  } catch {
+    throw new UsageError(`--state-file ${file} is not a valid state file`);
+  }
+  if (data.op_hash !== hash) {
+    throw new UsageError(
+      `--state-file ${file} was written by a different operation. Use a new state file, or delete it to start over.`,
+    );
+  }
+  return new Set(data.done || []);
+}
+
+/** Write the state file atomically (temp file + rename), so a crash can't corrupt it. */
+export function saveState(file: string | undefined, hash: string, done: Set<string>): void {
   if (!file) return;
-  fs.writeFileSync(file, JSON.stringify({ done: [...done], updated_at: new Date().toISOString() }, null, 2));
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ op_hash: hash, done: [...done], updated_at: new Date().toISOString() }, null, 2));
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * The state file to use: none in --dry-run/--plan/--validate, since nothing
+ * is applied there and marking IDs done would make the real run skip them.
+ */
+function stateFileFor(client: MetaClient, file: string | undefined): string | undefined {
+  if (file && client.isPreviewMode()) {
+    console.error(`Preview mode: --state-file ${file} is not read or written.`);
+    return undefined;
+  }
+  return file;
 }
 
 // ─── CSV sheet round trip ───────────────────────────────────────────────────
@@ -141,6 +172,9 @@ function collect(value: string, previous: string[] = []): string[] {
   return [...previous, value];
 }
 
+// Keys that change how Graph handles the request rather than setting a field.
+const RESERVED_SET_KEYS = new Set(['method', 'access_token', 'execution_options', 'batch']);
+
 /** Parse repeated --set key=value pairs into a request body. */
 export function parseSetPairs(pairs: string[]): Record<string, string> {
   const body: Record<string, string> = {};
@@ -148,7 +182,8 @@ export function parseSetPairs(pairs: string[]): Record<string, string> {
     const eq = pair.indexOf('=');
     if (eq <= 0) throw new Error(`--set must look like field=value, got: "${pair}"`);
     const key = pair.slice(0, eq).trim();
-    if (!/^[a-z_][a-z0-9_]*$/.test(key)) throw new Error(`--set field "${key}" isn't a valid API field name`);
+    if (!/^[a-z_][a-z0-9_]*$/.test(key)) throw new UsageError(`--set field "${key}" isn't a valid API field name`);
+    if (RESERVED_SET_KEYS.has(key)) throw new UsageError(`--set can't set "${key}"; it changes how the request is handled, not a field`);
     body[key] = pair.slice(eq + 1);
   }
   if (Object.keys(body).length === 0) throw new Error('Pass at least one --set field=value');
@@ -175,8 +210,14 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
       if (missing !== -1) {
         throw new Error(`--config entry ${missing} needs both "name" and "objective" (e.g. OUTCOME_SALES); there is no default objective.`);
       }
-      const batchSize = parseIntOption(opts.batchSize, '--batch-size', 1);
+      let batchSize = parseIntOption(opts.batchSize, '--batch-size', 1);
       const delayMs = parseIntOption(opts.delayMs, '--delay-ms', 0);
+      // The account daily-budget ceiling is checked per write against live
+      // budgets, so parallel creates can't see each other. Go one at a time.
+      if (batchSize > 1 && client.getPolicy().maxAccountDailyBudgetCents) {
+        console.error('Policy sets an account daily-budget ceiling: creating campaigns one at a time.');
+        batchSize = 1;
+      }
 
       const results = { created: [] as unknown[], failed: [] as unknown[] };
 
@@ -230,7 +271,7 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
     .option('--state-file <path>', 'Record finished IDs here and skip them when re-run (resume after a failure)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
-      await runBulkUpdate(getClient(), opts.ids, { status: opts.status }, opts);
+      await runBulkUpdate(getClient(), opts.ids, { status: opts.status }, opts, 'update-status');
     }));
 
   bulk
@@ -242,7 +283,7 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
     .option('--state-file <path>', 'Record finished IDs here and skip them when re-run')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
-      await runBulkUpdate(getClient(), opts.ids, parseSetPairs(opts.set), opts);
+      await runBulkUpdate(getClient(), opts.ids, parseSetPairs(opts.set), opts, 'update');
     }));
 
   bulk
@@ -291,7 +332,9 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
       if (rows.length && !('id' in rows[0])) throw new Error('The sheet needs an "id" column');
       const ignored = rows.length ? Object.keys(rows[0]).filter(c => c !== 'id' && !cfg.editable.includes(c) && !cfg.fields.includes(c)) : [];
       const client = getClient();
-      const done = loadState(opts.stateFile);
+      const stateFile = opts.apply ? stateFileFor(client, opts.stateFile) : undefined;
+      const hash = opHash(`import:${level}`, text);
+      const done = loadState(stateFile, hash);
       const plan: Array<{ id: string; changes: Record<string, { from: string; to: string }> }> = [];
       const errors: Array<{ id: string; error: string }> = [];
 
@@ -316,7 +359,7 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
             await client.request(item.id, { method: 'POST', body });
             applied.push(item.id);
             done.add(item.id);
-            saveState(opts.stateFile, done);
+            saveState(stateFile, hash, done);
           } catch (err) {
             errors.push({ id: item.id, error: (err as Error).message });
           }
@@ -381,6 +424,9 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
       if (!opts.accountId) throw new Error('Account ID required');
       const client = getClient();
       const images = parseJsonInput<Array<{ url: string; name?: string }>>(opts.images, '--images');
+      if (!Array.isArray(images) || images.some(img => !img || typeof img !== 'object' || typeof img.url !== 'string' || !img.url)) {
+        throw new UsageError('--images must be a JSON array of {"url": "...", "name": "..."} objects');
+      }
       const results = { uploaded: [] as unknown[], failed: [] as unknown[] };
 
       for (const img of images) {
@@ -410,10 +456,13 @@ async function runBulkUpdate(
   idList: string,
   body: Record<string, string>,
   opts: { delayMs: string; stateFile?: string; output: string },
+  op: string,
 ): Promise<void> {
   const ids = idList.split(',').map((id: string) => id.trim()).filter(Boolean);
   const delayMs = parseIntOption(opts.delayMs, '--delay-ms', 0);
-  const done = loadState(opts.stateFile);
+  const stateFile = stateFileFor(client, opts.stateFile);
+  const hash = opHash(op, body);
+  const done = loadState(stateFile, hash);
   const results = { updated: [] as unknown[], failed: [] as unknown[], skipped: [] as string[] };
 
   for (const id of ids) {
@@ -425,7 +474,7 @@ async function runBulkUpdate(
       const response = await client.request(id, { method: 'POST', body });
       results.updated.push({ id, data: response.data });
       done.add(id);
-      saveState(opts.stateFile, done);
+      saveState(stateFile, hash, done);
     } catch (err) {
       results.failed.push({ id, error: (err as Error).message });
     }

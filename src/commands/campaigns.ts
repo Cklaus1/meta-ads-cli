@@ -253,11 +253,14 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
 
       // Large budget jumps count as significant edits and can reset learning.
       if ((body.daily_budget || body.lifetime_budget) && !client.isDryRun()) {
-        const current = (await client.request(campaignId, {
-          params: { fields: 'daily_budget,lifetime_budget,adsets{learning_stage_info,effective_status}' },
-        })).data as Record<string, unknown>;
+        const [currentRes, adsetsRes] = await Promise.all([
+          client.request(campaignId, { params: { fields: 'daily_budget,lifetime_budget' } }),
+          // Every ad set, not just the first page of a field expansion.
+          client.requestAllPages(`${campaignId}/adsets`, { params: { fields: 'learning_stage_info,effective_status', limit: '200' } }),
+        ]);
+        const current = currentRes.data as Record<string, unknown>;
         const field = body.daily_budget ? 'daily_budget' : 'lifetime_budget';
-        const learning = (((current.adsets as Record<string, unknown> | undefined)?.data as Array<Record<string, unknown>>) || [])
+        const learning = (((adsetsRes.data as Record<string, unknown>).data as Array<Record<string, unknown>>) || [])
           .some(a => a.effective_status === 'ACTIVE' && (a.learning_stage_info as Record<string, unknown> | undefined)?.status === 'LEARNING');
         const warning = significantChangeWarning(Number(current[field] || 0), Number(body[field]), learning ? 'LEARNING' : undefined);
         if (warning && learning && !opts.force) {
@@ -397,20 +400,24 @@ export function preflightChecks(
   for (const a of adsets) {
     const scope = `adset ${a.id} (${a.name})`;
     const aStatus = String(a.status || '');
-    if (aStatus !== 'ACTIVE') {
-      add('warn', scope, 'status', `Ad set status is ${aStatus}.`);
+    const active = aStatus === 'ACTIVE';
+    if (!active) {
+      add('warn', scope, 'status', `Ad set status is ${aStatus}; it won't deliver, so its problems are reported as warnings.`);
     } else {
       deliverableAdsets.add(String(a.id));
     }
+    // Problems on paused or archived ad sets don't stop the campaign delivering.
+    const addFor = (st: PreflightCheck['status'], sc: string, check: string, detail: string) =>
+      add(st === 'fail' && !active ? 'warn' : st, sc, check, detail);
     const adsetBudget = Number(a.daily_budget || 0) > 0 || Number(a.lifetime_budget || 0) > 0;
-    if (!campaignBudget && !adsetBudget) add('fail', scope, 'budget', 'No budget at campaign or ad set level.');
-    if (campaignBudget && adsetBudget) add('fail', scope, 'budget', 'Budget set on both campaign and ad set; Meta rejects this.');
+    if (!campaignBudget && !adsetBudget) addFor('fail', scope, 'budget', 'No budget at campaign or ad set level.');
+    if (campaignBudget && adsetBudget) addFor('fail', scope, 'budget', 'Budget set on both campaign and ad set; Meta rejects this.');
     const targeting = a.targeting as Record<string, unknown> | undefined;
     const geo = targeting?.geo_locations as Record<string, unknown> | undefined;
-    if (!geo || !Object.keys(geo).length) add('fail', scope, 'targeting', 'No geo_locations in targeting.');
-    for (const issue of specialCategoryTargetingIssues(targeting, categories)) add('fail', scope, 'special_ad_category', issue);
+    if (!geo || !Object.keys(geo).length) addFor('fail', scope, 'targeting', 'No geo_locations in targeting.');
+    for (const issue of specialCategoryTargetingIssues(targeting, categories)) addFor('fail', scope, 'special_ad_category', issue);
     const end = Date.parse(String(a.end_time || ''));
-    if (Number.isFinite(end) && end < now) add('fail', scope, 'schedule', `End time ${a.end_time} is in the past.`);
+    if (Number.isFinite(end) && end < now) addFor('fail', scope, 'schedule', `End time ${a.end_time} is in the past.`);
     if (a.optimization_goal) {
       const { errors } = validateBidConfig({
         objective,
@@ -422,34 +429,38 @@ export function preflightChecks(
           ? Number((a.bid_constraints as Record<string, unknown>).roas_average_floor) / 10000 : undefined,
         promotedObject: a.promoted_object as Record<string, unknown> | undefined,
       });
-      for (const e of errors) add('fail', scope, 'bidding', e);
+      for (const e of errors) addFor('fail', scope, 'bidding', e);
     }
     const learning = (a.learning_stage_info as Record<string, unknown> | undefined)?.status;
-    if (learning === 'FAIL') add('warn', scope, 'learning', 'Learning limited: too few results to exit learning.');
-    else if (learning === 'LEARNING') add('warn', scope, 'learning', 'In the learning phase; avoid significant edits.');
+    if (learning === 'FAIL') addFor('warn', scope, 'learning', 'Learning limited: too few results to exit learning.');
+    else if (learning === 'LEARNING') addFor('warn', scope, 'learning', 'In the learning phase; avoid significant edits.');
     for (const issue of (a.issues_info as Array<Record<string, unknown>>) || []) {
-      add('fail', scope, 'delivery_issue', String(issue.error_summary || issue.error_message || JSON.stringify(issue)));
+      addFor('fail', scope, 'delivery_issue', String(issue.error_summary || issue.error_message || JSON.stringify(issue)));
     }
   }
 
   // Ads
   for (const a of adsets) {
     const adsetAds = ads.filter(ad => String(ad.adset_id) === String(a.id));
-    if (!adsetAds.length) add('fail', `adset ${a.id} (${a.name})`, 'ads', 'Ad set has no ads.');
+    const active = deliverableAdsets.has(String(a.id));
+    if (!adsetAds.length) add(active ? 'fail' : 'warn', `adset ${a.id} (${a.name})`, 'ads', 'Ad set has no ads.');
     else if (!adsetAds.some(ad => ad.status === 'ACTIVE')) add('warn', `adset ${a.id} (${a.name})`, 'ads', 'No ACTIVE ads in this ad set.');
   }
   for (const ad of ads) {
     const scope = `ad ${ad.id} (${ad.name})`;
-    if (!(ad.creative as Record<string, unknown> | undefined)?.id) add('fail', scope, 'creative', 'Ad has no creative.');
+    // Only ads that are ACTIVE in an ACTIVE ad set can block delivery.
+    const live = ad.status === 'ACTIVE' && deliverableAdsets.has(String(ad.adset_id));
+    const addAd = (st: PreflightCheck['status'], check: string, detail: string) => add(st === 'fail' && !live ? 'warn' : st, scope, check, detail);
+    if (!(ad.creative as Record<string, unknown> | undefined)?.id) addAd('fail', 'creative', 'Ad has no creative.');
     const eff = String(ad.effective_status || '');
-    if (eff === 'DISAPPROVED') add('fail', scope, 'review', `Disapproved: ${JSON.stringify(ad.ad_review_feedback || {})}`);
-    else if (eff === 'PENDING_REVIEW' || eff === 'IN_PROCESS') add('warn', scope, 'review', `Ad is ${eff}.`);
-    else if (eff === 'WITH_ISSUES') add('fail', scope, 'review', 'Ad has issues; see issues_info.');
+    if (eff === 'DISAPPROVED') addAd('fail', 'review', `Disapproved: ${JSON.stringify(ad.ad_review_feedback || {})}`);
+    else if (eff === 'PENDING_REVIEW' || eff === 'IN_PROCESS') addAd('warn', 'review', `Ad is ${eff}.`);
+    else if (eff === 'WITH_ISSUES') addAd('fail', 'review', 'Ad has issues; see issues_info.');
     for (const issue of (ad.issues_info as Array<Record<string, unknown>>) || []) {
-      add('fail', scope, 'delivery_issue', String(issue.error_summary || issue.error_message || JSON.stringify(issue)));
+      addAd('fail', 'delivery_issue', String(issue.error_summary || issue.error_message || JSON.stringify(issue)));
     }
   }
-  if (deliverableAdsets.size === 0 && adsets.length) add('warn', 'campaign', 'adsets', 'No ACTIVE ad sets.');
+  if (deliverableAdsets.size === 0 && adsets.length) add('fail', 'campaign', 'adsets', 'No ACTIVE ad sets, so nothing can deliver.');
 
   if (!checks.some(c => c.status !== 'ok')) add('ok', 'campaign', 'overall', 'No blocking issues found.');
   return checks;

@@ -43,7 +43,8 @@ describe('campaigns update (MEDIA_BUYER_GAPS #42, #45)', () => {
   it('blocks a large budget jump while ad sets are learning unless --force', async () => {
     const impl = async (endpoint: string, opts?: { method?: string }) => {
       if (opts?.method === 'POST') return { data: { success: true }, status: 200 };
-      return { data: { daily_budget: '10000', adsets: { data: [{ effective_status: 'ACTIVE', learning_stage_info: { status: 'LEARNING' } }] } }, status: 200 };
+      if (endpoint.endsWith('/adsets')) return { data: { data: [{ effective_status: 'ACTIVE', learning_stage_info: { status: 'LEARNING' } }] }, status: 200 };
+      return { data: { daily_budget: '10000' }, status: 200 };
     };
     const blocked = mockClient(impl);
     await expect(run(registerCampaignCommands, blocked.client, ['campaigns', 'update', 'c1', '--daily-budget', '20000'])).rejects.toThrow('--force');

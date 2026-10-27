@@ -5,10 +5,10 @@ import { PolicyError } from './errors.js';
 
 /**
  * Guardrails for delegated or agent access, read from a policy file that the
- * account owner controls. To make it tamper-resistant, have a different user
- * (e.g. root) own it and leave it read-only for the agent's user:
- *   sudo chown root:root policy.json && sudo chmod 644 policy.json
- * and point META_ADS_CLI_POLICY_FILE at it in the agent's environment.
+ * account owner controls. For a tamper-resistant setup, install it as root at
+ * SYSTEM_POLICY_PATH: when that file exists it always wins, and env vars
+ * can't point elsewhere. A policy under the agent's own home directory can be
+ * deleted or replaced by the agent, so it only protects against mistakes.
  */
 export interface Policy {
   /** Ad accounts (act_XXX) the CLI may touch. Empty/absent = any. */
@@ -43,10 +43,12 @@ export interface LoadedPolicy {
   exists: boolean;
 }
 
+export const SYSTEM_POLICY_PATH = '/etc/meta-ads-cli/policy.json';
+
 export function policyPath(): string | undefined {
+  // A system policy can't be redirected or removed by the (non-root) user.
+  if (process.platform !== 'win32' && fs.existsSync(SYSTEM_POLICY_PATH)) return SYSTEM_POLICY_PATH;
   if (process.env.META_ADS_CLI_POLICY_FILE) return process.env.META_ADS_CLI_POLICY_FILE;
-  // Don't let a developer's real policy leak into the test suite.
-  if (process.env.VITEST) return undefined;
   return path.join(CONFIG_DIR, 'policy.json');
 }
 
@@ -107,12 +109,31 @@ export function resetPolicyCache(): void {
   cached = undefined;
 }
 
-/** Whether the current user could edit the policy file (so an agent could loosen it). */
-export function policyWritableByCurrentUser(file: string): boolean {
+function canWrite(p: string): boolean {
   try {
-    fs.accessSync(file, fs.constants.W_OK);
+    fs.accessSync(p, fs.constants.W_OK);
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether the current user could edit, replace or delete the policy file (so
+ * an agent could loosen it). Deleting needs write access to the directory,
+ * unless the directory is sticky and the file belongs to someone else.
+ */
+export function policyWritableByCurrentUser(file: string): boolean {
+  if (canWrite(file)) return true;
+  const dir = path.dirname(file);
+  if (!canWrite(dir)) return false;
+  try {
+    const dirStat = fs.statSync(dir);
+    const sticky = (dirStat.mode & 0o1000) !== 0;
+    const uid = process.getuid?.();
+    if (sticky && uid !== undefined && uid !== 0 && fs.statSync(file).uid !== uid) return false;
+  } catch {
+    return true;
+  }
+  return true;
 }

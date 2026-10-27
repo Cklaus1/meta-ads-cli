@@ -11,6 +11,12 @@ export function mockClient(impl: RequestFn, dryRun = false) {
     request,
     requestAllPages: vi.fn(impl),
     isDryRun: () => dryRun,
+    isPlanMode: () => false,
+    isValidateMode: () => false,
+    isPreviewMode: () => dryRun,
+    getPolicy: () => ({}),
+    getMaxSpendCapCents: () => 0,
+    isLiveAllowed: () => false,
   };
   return { client: client as unknown as MetaClient, request, requestAllPages: client.requestAllPages };
 }

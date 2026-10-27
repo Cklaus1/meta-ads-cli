@@ -112,7 +112,7 @@ Key conventions:
 | `META_ADS_CLI_MAX_WAIT_MS` | Max auto-wait on a rate-limit throttle (default 90000) |
 | `META_ADS_CLI_HTTP_TIMEOUT_MS` / `META_ADS_CLI_UPLOAD_TIMEOUT_MS` | Per-request HTTP timeout (default 60000) / upload timeout (default 600000) |
 | `META_ADS_CLI_NO_KEYCHAIN` | Skip the OS keychain and use the file token cache only |
-| `META_ADS_CLI_AUTH_SCOPES` | Override the OAuth scope list requested by `auth login` |
+| `META_ADS_CLI_AUTH_SCOPES` / `META_ADS_CLI_AUTH_EXTRA_SCOPES` | Replace, or add to, the OAuth scopes `auth login` requests (default: ads permissions only) |
 | `META_ADS_CLI_THREADS_ACCESS_TOKEN` | Threads token for `threads` commands (graph.threads.com) |
 | `META_ADS_CLI_POLICY_FILE` | Safety policy file (default `~/.config/meta-ads-cli/policy.json`) |
 | `META_ADS_CLI_JOURNAL_FILE` / `META_ADS_CLI_NO_JOURNAL` | Write journal path / disable it |

@@ -106,7 +106,7 @@ export function registerDuplicationCommands(program: Command, getClient: () => M
     .option('--new-description <text>', 'Override description')
     .option('--new-cta <type>', 'Override call-to-action type')
     .option('--new-link-url <url>', 'Override destination URL')
-    .option('--account-id <id>', 'Ad account for the copy (default: the original creative\'s account)', process.env.META_ADS_CLI_ACCOUNT_ID || '')
+    .option('--account-id <id>', 'Ad account for the copy (default: the original creative\'s account)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (creativeId: string, opts) => {
       const client = getClient();
@@ -135,7 +135,12 @@ export function registerDuplicationCommands(program: Command, getClient: () => M
         body.object_story_spec = JSON.stringify(spec);
       }
 
-      const accountId = opts.accountId || (original.account_id ? `act_${original.account_id}` : '');
+      // The copy belongs with the original (its image_hash only exists in that
+      // account); the env default account is only a last resort.
+      const accountId = opts.accountId
+        || (original.account_id ? `act_${original.account_id}` : '')
+        || process.env.META_ADS_CLI_ACCOUNT_ID
+        || '';
       if (!accountId) {
         throw new Error('Account ID required for creative duplication. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
       }

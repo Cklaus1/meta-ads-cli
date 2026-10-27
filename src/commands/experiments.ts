@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, UsageError } from '../errors.js';
 import { parseJsonInput } from '../json-input.js';
 
 function getDefaultBusinessId(): string {
@@ -124,6 +124,16 @@ export function registerExperimentCommands(program: Command, getClient: () => Me
       const cells: StudyCell[] = opts.cells
         ? parseJsonInput<StudyCell[]>(opts.cells, '--cells')
         : (opts.cell || []).map(parseCell);
+      if (!Array.isArray(cells) || cells.some(c => !c || typeof c !== 'object' || Array.isArray(c))) {
+        throw new UsageError('--cells must be a JSON array of cell objects');
+      }
+      let confidenceLevel: number | undefined;
+      if (opts.confidenceLevel !== undefined) {
+        confidenceLevel = Number(opts.confidenceLevel);
+        if (!Number.isFinite(confidenceLevel) || confidenceLevel <= 0 || confidenceLevel >= 100) {
+          throw new UsageError(`--confidence-level must be a percentage between 0 and 100, got "${opts.confidenceLevel}"`);
+        }
+      }
       const start = toUnix(opts.start, '--start');
       const days = Number(opts.days);
       if (!opts.end && (!Number.isFinite(days) || days <= 0)) throw new Error(`--days must be a positive number, got "${opts.days}"`);
@@ -135,7 +145,7 @@ export function registerExperimentCommands(program: Command, getClient: () => Me
         end,
         cells,
         description: opts.description,
-        confidenceLevel: opts.confidenceLevel !== undefined ? Number(opts.confidenceLevel) : undefined,
+        confidenceLevel,
         objectives: opts.objectives ? parseJsonInput(opts.objectives, '--objectives') : undefined,
       });
       const response = await getClient().request(`${opts.businessId}/ad_studies`, { method: 'POST', body });
