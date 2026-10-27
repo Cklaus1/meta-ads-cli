@@ -3,9 +3,51 @@ import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 import { launchFailureMessage } from './workflows.js';
+import { applyAdsetBudgetSharing } from './campaigns.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
+}
+
+function splitList(value: unknown): string[] {
+  return String(value ?? '').split(',').map(v => v.trim()).filter(Boolean);
+}
+
+/**
+ * Build the campaign and ad set bodies for an Advantage+ catalog (dynamic)
+ * retargeting campaign: people who triggered includeEvents for products in
+ * the set within retentionDays, minus anyone who triggered excludeEvents.
+ */
+export function buildDynamicRetargetingBodies(o: {
+  campaignName: string; objective: string; catalogId: string; productSetId: string; countries: string[];
+  includeEvents: string[]; excludeEvents: string[]; retentionDays: number; conversionEvent: string;
+}): { campaignBody: Record<string, string>; adsetBody: Record<string, string> } {
+  if (o.includeEvents.length === 0) throw new Error('--include-events must list at least one event');
+  const retentionSeconds = o.retentionDays * 86400;
+  const rule = (event: string) => ({ retention_seconds: retentionSeconds, rule: { event: { eq: event } } });
+  const audienceSpec: Record<string, unknown> = {
+    product_set_id: o.productSetId,
+    inclusions: o.includeEvents.map(rule),
+  };
+  if (o.excludeEvents.length) audienceSpec.exclusions = o.excludeEvents.map(rule);
+
+  return {
+    campaignBody: {
+      name: o.campaignName,
+      objective: o.objective,
+      status: 'PAUSED',
+      special_ad_categories: '[]',
+      promoted_object: JSON.stringify({ product_catalog_id: o.catalogId }),
+    },
+    adsetBody: {
+      name: `${o.campaignName} - Dynamic Retargeting`,
+      optimization_goal: 'OFFSITE_CONVERSIONS',
+      billing_event: 'IMPRESSIONS',
+      status: 'PAUSED',
+      promoted_object: JSON.stringify({ product_set_id: o.productSetId, custom_event_type: o.conversionEvent }),
+      targeting: JSON.stringify({ geo_locations: { countries: o.countries }, product_audience_specs: [audienceSpec] }),
+    },
+  };
 }
 
 export function registerRetargetingCommands(program: Command, getClient: () => MetaClient): void {
@@ -204,11 +246,21 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
     .requiredOption('--page-id <id>', 'Facebook Page ID')
     .option('--daily-budget <cents>', 'Daily budget in cents', '5000')
     .option('--budget-level <level>', 'Where the budget lives: campaign (CBO) or adset', 'campaign')
+    .option('--adset-budget-sharing', 'With --budget-level adset, let ad sets share up to 20% of budget')
     .option('--countries <codes>', 'Comma-separated country codes for ad set targeting', 'US')
     .option('--objective <obj>', 'Campaign objective', 'OUTCOME_SALES')
+    .option('--catalog-id <id>', 'Product catalog ID (looked up from the product set if omitted)')
+    .option('--include-events <events>', 'Pixel events that make someone eligible (comma-separated)', 'ViewContent,AddToCart')
+    .option('--exclude-events <events>', 'Pixel events that exclude someone (comma-separated, "" for none)', 'Purchase')
+    .option('--retention-days <n>', 'How far back to look for those events (1-180)', '30')
+    .option('--conversion-event <event>', 'Event the ad set optimizes for (custom_event_type)', 'PURCHASE')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
+      const retentionDays = Number(opts.retentionDays);
+      if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 180) {
+        throw new Error(`--retention-days must be an integer from 1 to 180, got: "${opts.retentionDays}"`);
+      }
       if (opts.budgetLevel !== 'campaign' && opts.budgetLevel !== 'adset') {
         throw new Error(`--budget-level must be "campaign" or "adset", got: "${opts.budgetLevel}"`);
       }
@@ -217,24 +269,34 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
       const client = getClient();
       const created: Record<string, string> = {};
 
-      // The budget goes on one level only: Meta rejects ad set budgets under a campaign budget.
-      const campBody: Record<string, string> = {
-        name: opts.campaignName,
+      // Catalog ads need the catalog on the campaign; find it from the product set.
+      let catalogId: string | undefined = opts.catalogId;
+      if (!catalogId) {
+        if (client.isDryRun()) {
+          catalogId = '<catalog-id-from-product-set>';
+        } else {
+          const ps = await client.request(opts.productSetId, { params: { fields: 'product_catalog' } });
+          catalogId = ((ps.data as Record<string, unknown>).product_catalog as Record<string, string> | undefined)?.id;
+          if (!catalogId) throw new Error('Could not find the catalog for this product set. Pass --catalog-id.');
+        }
+      }
+
+      const budgetBody = buildDynamicRetargetingBodies({
+        campaignName: opts.campaignName,
         objective: opts.objective,
-        status: 'PAUSED',
-        special_ad_categories: '[]',
-      };
-      const adsetBody: Record<string, string> = {
-        name: `${opts.campaignName} - Dynamic Retargeting`,
-        optimization_goal: 'OFFSITE_CONVERSIONS',
-        billing_event: 'IMPRESSIONS',
-        status: 'PAUSED',
-        promoted_object: JSON.stringify({ product_set_id: opts.productSetId }),
-        targeting: JSON.stringify({ geo_locations: { countries } }),
-        is_dynamic_creative: 'false',
-      };
+        catalogId,
+        productSetId: opts.productSetId,
+        countries,
+        includeEvents: splitList(opts.includeEvents),
+        excludeEvents: splitList(opts.excludeEvents),
+        retentionDays,
+        conversionEvent: String(opts.conversionEvent).toUpperCase(),
+      });
+      const campBody = budgetBody.campaignBody;
+      const adsetBody = budgetBody.adsetBody;
       if (opts.budgetLevel === 'campaign') campBody.daily_budget = opts.dailyBudget;
       else adsetBody.daily_budget = opts.dailyBudget;
+      applyAdsetBudgetSharing(campBody, opts.adsetBudgetSharing);
 
       try {
         const campResponse = await client.request(`${opts.accountId}/campaigns`, { method: 'POST', body: campBody });
@@ -250,7 +312,8 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
           campaign: campResponse.data,
           adset: adsetResponse.data,
           budget_level: opts.budgetLevel,
-          note: 'Dynamic retargeting campaign created. Add creatives and activate when ready.',
+          catalog_id: catalogId,
+          note: 'Dynamic retargeting campaign created. Add a catalog (template) creative and activate when ready.',
         }, opts.output as OutputFormat));
       } catch (err) {
         throw new Error(launchFailureMessage(err, created));

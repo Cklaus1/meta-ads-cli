@@ -33,6 +33,11 @@ export async function waitForContainer(
   throw new Error(`Media container ${containerId} was still processing after ${Math.round(maxAttempts * intervalMs / 1000)}s. Not publishing.`);
 }
 
+// Current IG insights metrics (impressions, plays, video_views, profile_views,
+// website_clicks and the story exits/taps metrics were removed by Meta).
+const MEDIA_METRICS = 'views,reach,likes,comments,shares,saved,total_interactions';
+const ACCOUNT_METRICS = 'reach,views,accounts_engaged,total_interactions,profile_links_taps';
+
 export function registerInstagramCommands(program: Command, getClient: () => MetaClient): void {
   const instagram = program.command('instagram').alias('ig').description('Instagram Shopping and business profile management');
 
@@ -338,11 +343,12 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
   instagram
     .command('media-insights <mediaId>')
     .description('Get insights for a specific media item')
-    .option('--metrics <list>', 'Comma-separated metrics (defaults vary by media type)')
+    .option('--metrics <list>', `Comma-separated metrics (default: ${MEDIA_METRICS}; reels also: ig_reels_avg_watch_time, ig_reels_video_view_total_time)`)
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (mediaId: string, opts) => {
       const client = getClient();
-      const defaultMetrics = 'impressions,reach,engagement,saved,video_views,likes,comments,shares';
+      // impressions, plays and video_views were removed; views replaces them.
+      const defaultMetrics = MEDIA_METRICS;
       const params: Record<string, string> = {
         metric: opts.metrics || defaultMetrics,
       };
@@ -368,13 +374,15 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
   instagram
     .command('story-insights <storyId>')
     .description('Get insights for a specific story')
-    .option('--metrics <list>', 'Comma-separated metrics', 'impressions,reach,replies,exits,taps_forward,taps_back')
+    .option('--metrics <list>', 'Comma-separated metrics (exits/taps are now the "navigation" metric)', 'views,reach,replies,shares,total_interactions,navigation')
+    .option('--breakdown <breakdown>', 'Breakdown, e.g. story_navigation_action_type (use with --metrics navigation only)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (storyId: string, opts) => {
       const client = getClient();
       const params: Record<string, string> = {
         metric: opts.metrics,
       };
+      if (opts.breakdown) params.breakdown = opts.breakdown;
 
       const response = await client.request(`${storyId}/insights`, { params });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
@@ -442,15 +450,17 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
   instagram
     .command('insights <instagramId>')
     .description('Get account-level Instagram insights')
-    .option('--metrics <list>', 'Comma-separated metrics', 'impressions,reach,profile_views,website_clicks,follower_count,email_contacts,phone_call_clicks,text_message_clicks,get_directions_clicks')
-    .option('--period <period>', 'Aggregation period: day, week, days_28, month, lifetime', 'day')
-    .option('--time-range <range>', 'Time range', 'last_30d')
+    .option('--metrics <list>', 'Comma-separated metrics: reach, views, accounts_engaged, total_interactions, profile_links_taps, likes, comments, shares, saves, replies, reposts, follows_and_unfollows', ACCOUNT_METRICS)
+    .option('--period <period>', 'Aggregation period (account metrics use day)', 'day')
+    .option('--metric-type <type>', 'total_value (one total for the range) or time_series (reach only)', 'total_value')
+    .option('--time-range <range>', 'Time range (max 30 days for total_value)', 'last_30d')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (instagramId: string, opts) => {
       const client = getClient();
       const params: Record<string, string> = {
         metric: opts.metrics,
         period: opts.period,
+        metric_type: opts.metricType,
       };
 
       const resolved = resolveTimeRange(opts.timeRange);
@@ -471,14 +481,20 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (instagramId: string, opts) => {
       const client = getClient();
+      // impressions, profile_views and website_clicks were removed; profile
+      // link taps and views are the closest current equivalents.
       const params: Record<string, string> = {
-        fields: 'impressions,reach,profile_views,website_clicks',
         period: 'day',
-        metric: 'impressions,reach,profile_views,website_clicks',
+        metric: 'reach,views,profile_links_taps,total_interactions',
+        metric_type: 'total_value',
       };
 
       const resolved = resolveTimeRange(opts.timeRange);
-      if (resolved) params.time_range = resolved;
+      if (resolved) {
+        const range = JSON.parse(resolved);
+        params.since = range.since;
+        params.until = range.until;
+      }
 
       const response = await client.request(`${instagramId}/insights`, { params });
       console.log(formatOutput(response.data, opts.output as OutputFormat));

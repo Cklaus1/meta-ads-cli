@@ -13,7 +13,7 @@ const FALLBACK_TOKEN_PATH = path.join(CONFIG_DIR, 'token-cache.json');
 
 export const AUTH_SCOPE = [
   'business_management', 'public_profile', 'ads_management', 'ads_read', 'read_insights', 'leads_retrieval',
-  'pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'pages_manage_engagement',
+  'pages_show_list', 'pages_read_engagement', 'pages_manage_ads', 'pages_manage_posts', 'pages_manage_engagement',
   'pages_manage_metadata', 'pages_messaging', 'instagram_basic', 'instagram_content_publish',
   'instagram_manage_insights', 'catalog_management',
 ].join(',');

@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { handleErrors } from '../errors.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -293,7 +294,7 @@ const SKILLS: SkillDef[] = [
       'meta-ads messenger get-profile 12345',
       'meta-ads messenger set-profile 12345 --get-started "welcome"',
       'meta-ads messenger conversations 12345',
-      'meta-ads messenger messages 67890',
+      'meta-ads messenger messages 67890 --page-id 12345',
     ],
   },
   {
@@ -395,7 +396,7 @@ export function registerGenerateSkillsCommand(program: Command): void {
     .command('generate-skills')
     .description('Generate SKILL.md files for Claude Code / OpenClaw agents')
     .option('--output-dir <dir>', 'Output directory for skills', './skills')
-    .action((opts) => {
+    .action(handleErrors(async (opts) => {
       const outDir = path.resolve(opts.outputDir);
       if (!fs.existsSync(outDir)) {
         fs.mkdirSync(outDir, { recursive: true });
@@ -428,5 +429,5 @@ export function registerGenerateSkillsCommand(program: Command): void {
       console.log(`Generated: ${path.join(outDir, 'INDEX.md')}`);
 
       console.log(`\nGenerated ${SKILLS.length} skill files + INDEX.md in ${outDir}`);
-    });
+    }));
 }

@@ -257,3 +257,32 @@ describe('guards', () => {
     });
   });
 });
+
+describe('Meta error details and version warnings', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('includes error_user_title and error_user_msg in the thrown error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: false, status: 400, statusText: '', headers: new Headers(),
+      text: () => Promise.resolve(JSON.stringify({ error: {
+        message: 'Invalid parameter', code: 100,
+        error_user_title: 'Advantage+ audience required', error_user_msg: 'Set advantage_audience to 0 or 1.',
+      } })),
+    } as Response);
+    const client = new MetaClient({ getToken: vi.fn().mockResolvedValue('t') } as never);
+    await expect(client.request('act_1/adsets', { method: 'POST', body: {} }))
+      .rejects.toThrow('Invalid parameter — Advantage+ audience required: Set advantage_audience to 0 or 1.');
+  });
+
+  it('prints the auto-upgrade warning header once', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => Promise.resolve({
+      ok: true, status: 200, statusText: '', headers: new Headers({ 'x-ad-api-version-warning': 'Upgraded from v24.0 to v26.0' }),
+      text: () => Promise.resolve('{"id":"1"}'),
+    } as Response));
+    const client = new MetaClient({ getToken: vi.fn().mockResolvedValue('t') } as never);
+    await client.request('act_1');
+    await client.request('act_1');
+    expect(err.mock.calls.filter(c => String(c[0]).includes('Upgraded from v24.0'))).toHaveLength(1);
+  });
+});

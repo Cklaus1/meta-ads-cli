@@ -5,7 +5,7 @@ import { parseCents, validateEndpoint } from './validate.js';
 
 const MAX_RETRIES = 3;
 const MAX_PAGES = 100;
-export const API_VERSION = 'v25.0';
+export const API_VERSION = 'v26.0';
 
 // Meta reports usage as a percentage (0–100) of each rate-limit budget via the
 // X-Business-Use-Case-Usage / X-Ad-Account-Usage / X-App-Usage headers. When any
@@ -18,7 +18,7 @@ const MAX_AUTO_WAIT_MS = Number(process.env.META_ADS_CLI_MAX_WAIT_MS) || 90_000;
 // Per-request HTTP timeout so a stalled connection can't hang the CLI forever.
 const HTTP_TIMEOUT_MS = Number(process.env.META_ADS_CLI_HTTP_TIMEOUT_MS) || 60_000;
 const UPLOAD_TIMEOUT_MS = Number(process.env.META_ADS_CLI_UPLOAD_TIMEOUT_MS) || 600_000;
-export const THREADS_BASE_URL = 'https://graph.threads.net/v1.0';
+export const THREADS_BASE_URL = 'https://graph.threads.com/v1.0';
 
 export interface MetaRequestOptions {
   method?: string;
@@ -113,6 +113,7 @@ export class MetaClient {
   private maxSpendCapCents: number;
   /** Most recent usage reading, for proactive throttling between calls. */
   private lastUsage: UsageSnapshot = { peakPct: 0, detail: '' };
+  private warnedVersion = false;
 
   constructor(auth: AuthManager, dryRun = false, apiVersion?: string, readOnly = false, maxSpendCapCents = 0) {
     this.auth = auth;
@@ -293,6 +294,13 @@ export class MetaClient {
 
       logger.debug(`Response: ${response.status} ${response.statusText}`, { attempt });
 
+      // Meta sets this when it auto-upgraded the call from an expired version.
+      const versionWarning = response.headers?.get?.('x-ad-api-version-warning');
+      if (versionWarning && !this.warnedVersion) {
+        this.warnedVersion = true;
+        console.error(`Meta API version warning: ${versionWarning}`);
+      }
+
       // Record usage from this response for the next call's proactive throttle.
       this.lastUsage = parseUsageHeaders(response.headers);
       if (this.lastUsage.peakPct > 0) {
@@ -335,7 +343,13 @@ export class MetaClient {
 
       if (!response.ok || obj.error) {
         const errorObj = obj.error as Record<string, unknown> | undefined;
-        const errorMessage = errorObj?.message || text;
+        // error_user_title/error_user_msg carry the actionable explanation for
+        // most Marketing API validation errors; the plain message is generic.
+        const userDetail = [errorObj?.error_user_title, errorObj?.error_user_msg]
+          .filter((v): v is string => typeof v === 'string' && v.length > 0).join(': ');
+        const errorMessage = errorObj?.message
+          ? `${errorObj.message}${userDetail ? ` — ${userDetail}` : ''}`
+          : text;
         const errorCode = Number(errorObj?.code);
         const errorSubcode = Number(errorObj?.error_subcode);
 

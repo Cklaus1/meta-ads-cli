@@ -2,7 +2,9 @@
 
 A standalone command-line tool for managing Facebook, Instagram, Threads & WhatsApp advertising via the Meta Graph API. Built for both humans and AI agents.
 
-**37 command groups | 250+ subcommands | Graph API v25.0 | Full Meta platform coverage**
+**37 command groups | 250+ subcommands | Graph API v26.0 | Full Meta platform coverage**
+
+> **Upgrading to 0.3.0?** A few commands changed behaviour. See [CHANGELOG.md](CHANGELOG.md#breaking-changes).
 
 ## Features
 
@@ -116,7 +118,7 @@ Token storage: OS keychain via `keytar`, fallback to `~/.config/meta-ads-cli/tok
 | `--dry-run` | Preview API requests without executing |
 | `--read-only` | Block all POST/DELETE requests |
 | `--max-spend-cap <cents>` | Block any write whose budget exceeds this ceiling (see [docs/SPENDING_CAPS.md](docs/SPENDING_CAPS.md)) |
-| `--api-version <version>` | Graph API version (default: `v25.0`) |
+| `--api-version <version>` | Graph API version (default: `v26.0`) |
 | `--profile <name>` | Use a named profile for credentials and account |
 | `-V, --version` | Show CLI version |
 
@@ -362,7 +364,7 @@ Preview any API request without executing it:
 
 ```bash
 meta-ads campaigns create --account-id act_123 --name "Test" --objective OUTCOME_TRAFFIC --dry-run
-# [dry-run] POST https://graph.facebook.com/v25.0/act_123/campaigns
+# [dry-run] POST https://graph.facebook.com/v26.0/act_123/campaigns
 # [dry-run] Body: {"name":"Test","objective":"OUTCOME_TRAFFIC",...}
 ```
 
@@ -393,7 +395,7 @@ npm run test:watch
 | `META_ADS_CLI_APP_SECRET` | Meta App Secret | For long-lived tokens |
 | `META_ADS_CLI_ACCESS_TOKEN` | Direct access token | Alternative to OAuth |
 | `META_ADS_CLI_ACCOUNT_ID` | Default ad account ID | Optional |
-| `META_ADS_CLI_API_VERSION` | Graph API version | Optional (default: v25.0) |
+| `META_ADS_CLI_API_VERSION` | Graph API version | Optional (default: v26.0) |
 | `META_ADS_CLI_LOG_LEVEL` | Log level (debug/info/warn/error/none) | Optional |
 | `META_ADS_CLI_LOG_FILE` | Log file path (daily rotation) | Optional |
 

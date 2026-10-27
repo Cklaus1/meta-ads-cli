@@ -83,9 +83,18 @@ describe('duplicate (BUG-26)', () => {
   it('sends rename_options with the suffix', async () => {
     const client = makeClient();
     await run(registerDuplicationCommands, client, ['duplicate', 'campaign', '1', '--name-suffix', ' v2']);
-    expect(client.request).toHaveBeenCalledTimes(1);
-    const body = client.request.mock.calls[0][1].body;
+    // A GET checks the campaign type first, then the copy is POSTed.
+    expect(client.request).toHaveBeenCalledTimes(2);
+    const body = client.request.mock.calls[1][1].body;
     expect(JSON.parse(body.rename_options)).toEqual({ rename_strategy: 'ONLY_TOP_LEVEL_RENAME', rename_suffix: ' v2' });
+  });
+
+  it('refuses to copy an Advantage+ Shopping campaign', async () => {
+    const client = makeClient();
+    client.request.mockResolvedValueOnce({ data: { smart_promotion_type: 'AUTOMATED_SHOPPING_ADS' }, status: 200 });
+    await expect(run(registerDuplicationCommands, client, ['duplicate', 'campaign', '1'])).rejects.toThrow('exit 1');
+    expect(String(vi.mocked(console.error).mock.calls.at(-1)?.[0])).toContain('Advantage+ Shopping');
+    expect(client.request).toHaveBeenCalledTimes(1);
   });
 
   it('creative dup uses --account-id', async () => {
@@ -96,20 +105,15 @@ describe('duplicate (BUG-26)', () => {
   });
 });
 
-describe('lookalike countries (BUG-35)', () => {
-  it('keeps single-country form', async () => {
-    const client = makeClient();
-    await run(registerAudienceCommands, client, ['audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5', '--countries', 'US']);
-    const spec = JSON.parse(client.request.mock.calls[0][1].body.lookalike_spec);
-    expect(spec.country).toBe('US');
-  });
-
-  it('uses location_spec for several countries', async () => {
+describe('lookalike countries (Meta API update #9)', () => {
+  it('sends no country or location_spec and warns about --countries', async () => {
     const client = makeClient();
     await run(registerAudienceCommands, client, ['audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5', '--countries', 'US,GB']);
     const spec = JSON.parse(client.request.mock.calls[0][1].body.lookalike_spec);
     expect(spec.country).toBeUndefined();
-    expect(spec.location_spec).toEqual({ geo_locations: { countries: ['US', 'GB'] } });
+    expect(spec.location_spec).toBeUndefined();
+    expect(spec).toMatchObject({ type: 'similarity', ratio: 0.01 });
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--countries is ignored'));
   });
 });
 

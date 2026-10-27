@@ -4,7 +4,7 @@ import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 
 /**
- * Threads API lives on a separate host (graph.threads.net) and needs a Threads
+ * Threads API lives on a separate host (graph.threads.com) and needs a Threads
  * user token. Set META_ADS_CLI_THREADS_ACCESS_TOKEN to one; otherwise the
  * normal access token is sent.
  */
@@ -13,6 +13,77 @@ function threadsApi(): Pick<MetaRequestOptions, 'baseUrl' | 'accessToken'> {
     baseUrl: THREADS_BASE_URL,
     accessToken: process.env.META_ADS_CLI_THREADS_ACCESS_TOKEN || undefined,
   };
+}
+
+const REPLY_CONTROLS = ['everyone', 'accounts_you_follow', 'mentioned_only', 'parent_post_author_only', 'followers_only'];
+const MAX_LINKS = 5;
+const MAX_TEXT_LENGTH = 500;
+
+/**
+ * Build and validate the optional Threads post fields (polls, GIFs, spoilers,
+ * reply controls, ...) from command options. Limits come from the Threads docs.
+ */
+export function buildThreadsPostFields(opts: Record<string, any>): Record<string, string> {
+  const body: Record<string, string> = {};
+  const text: string = opts.text ?? '';
+  const isMedia = Boolean(opts.imageUrl || opts.videoUrl) || (opts.mediaType && opts.mediaType !== 'TEXT');
+
+  // (Meta counts emojis by UTF-8 bytes, so this check is a lower bound.)
+  if ([...text].length > MAX_TEXT_LENGTH) {
+    throw new Error(`Threads posts are limited to ${MAX_TEXT_LENGTH} characters`);
+  }
+  const links = text.match(/https?:\/\/\S+/gi) || [];
+  if (links.length > MAX_LINKS) {
+    throw new Error(`Threads posts can contain at most ${MAX_LINKS} links (found ${links.length})`);
+  }
+
+  if (opts.topicTag) {
+    if (/[.&]/.test(opts.topicTag)) throw new Error('--topic-tag cannot contain "." or "&"');
+    body.topic_tag = opts.topicTag;
+  }
+  if (opts.poll) {
+    if (isMedia) throw new Error('Polls can only be attached to text posts');
+    const options = String(opts.poll).split(',').map(o => o.trim());
+    if (options.length < 2 || options.length > 4) throw new Error('--poll needs 2 to 4 options');
+    if (options.some(o => o.length < 1 || o.length > 25)) throw new Error('Each poll option must be 1-25 characters');
+    const keys = ['option_a', 'option_b', 'option_c', 'option_d'];
+    body.poll_attachment = JSON.stringify(Object.fromEntries(options.map((o, i) => [keys[i], o])));
+  }
+  if (opts.gifId) {
+    if (isMedia) throw new Error('GIFs can only be attached to text posts');
+    body.gif_attachment = JSON.stringify({ gif_id: opts.gifId, provider: 'GIPHY' });
+  }
+  if (opts.spoilerText) {
+    const entities = String(opts.spoilerText).split(',').map(r => {
+      const m = r.trim().match(/^(\d+):(\d+)$/);
+      if (!m || Number(m[2]) < 1) throw new Error(`--spoiler-text ranges must be "offset:length", got: "${r}"`);
+      return { entity_type: 'SPOILER', offset: Number(m[1]), length: Number(m[2]) };
+    });
+    if (entities.length > 10) throw new Error('A post can have at most 10 text spoilers');
+    body.text_entities = JSON.stringify(entities);
+  }
+  if (opts.spoilerMedia) {
+    if (!isMedia) throw new Error('--spoiler-media needs an image, video or carousel');
+    body.is_spoiler_media = 'true';
+  }
+  if (opts.replyControl) {
+    if (!REPLY_CONTROLS.includes(opts.replyControl)) {
+      throw new Error(`--reply-control must be one of: ${REPLY_CONTROLS.join(', ')}`);
+    }
+    body.reply_control = opts.replyControl;
+  }
+  if (opts.replyApprovals) body.enable_reply_approvals = 'true';
+  if (opts.locationId) body.location_id = opts.locationId;
+  if (opts.quotePostId) body.quote_post_id = opts.quotePostId;
+  if (opts.shareToIgStory) body.crossreshare_to_ig = 'true';
+  if (opts.countries) {
+    body.allowlisted_country_codes = JSON.stringify(String(opts.countries).split(',').map(c => c.trim().toUpperCase()).filter(Boolean));
+  }
+  if (opts.altText) {
+    if (String(opts.altText).length > 1000) throw new Error('--alt-text is limited to 1000 characters');
+    body.alt_text = opts.altText;
+  }
+  return body;
 }
 
 export function registerThreadsCommands(program: Command, getClient: () => MetaClient): void {
@@ -45,6 +116,18 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
     .option('--media-type <type>', 'Media type: TEXT, IMAGE, VIDEO, CAROUSEL', 'TEXT')
     .option('--reply-to <id>', 'Thread ID to reply to')
     .option('--link-attachment <url>', 'URL to attach as link preview')
+    .option('--topic-tag <tag>', 'Topic tag for the post (no "." or "&")')
+    .option('--poll <options>', 'Poll options, comma-separated (2-4, each 1-25 chars; text posts only)')
+    .option('--gif-id <id>', 'GIPHY GIF ID to attach (text posts only)')
+    .option('--spoiler-text <ranges>', 'Mark text as spoiler: "offset:length[,offset:length...]" (max 10)')
+    .option('--spoiler-media', 'Blur attached image/video/carousel media as a spoiler')
+    .option('--reply-control <who>', 'Who can reply: everyone, accounts_you_follow, mentioned_only, parent_post_author_only, followers_only')
+    .option('--reply-approvals', 'Require approval for replies')
+    .option('--location-id <id>', 'Location ID to tag (find one with GET /location_search)')
+    .option('--quote-post-id <id>', 'Quote another post')
+    .option('--share-to-ig-story', 'Also share to the linked Instagram account as a Story (needs threads_share_to_instagram)')
+    .option('--countries <codes>', 'Only show in these countries (comma-separated ISO codes)')
+    .option('--alt-text <text>', 'Alt text for an image or video (max 1000 chars)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       const client = getClient();
@@ -53,6 +136,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
       const containerBody: Record<string, string> = {
         text: opts.text,
         media_type: opts.mediaType,
+        ...buildThreadsPostFields(opts),
       };
       if (opts.imageUrl) {
         containerBody.image_url = opts.imageUrl;
@@ -196,7 +280,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
     .command('insights')
     .description('Get Threads account-level insights')
     .option('--user-id <id>', 'Threads user ID (default: me)', 'me')
-    .option('--metrics <list>', 'Comma-separated metrics', 'views,likes,replies,reposts,quotes,followers_count')
+    .option('--metrics <list>', 'Comma-separated metrics', 'views,likes,replies,reposts,quotes,clicks,followers_count')
     .option('--since <timestamp>', 'Unix timestamp start')
     .option('--until <timestamp>', 'Unix timestamp end')
     .option('-o, --output <format>', 'Output format', 'json')
@@ -215,7 +299,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
   threads
     .command('post-insights <threadId>')
     .description('Get insights for a specific Threads post')
-    .option('--metrics <list>', 'Comma-separated metrics', 'views,likes,replies,reposts,quotes')
+    .option('--metrics <list>', 'Comma-separated metrics', 'views,likes,replies,reposts,quotes,shares')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (threadId: string, opts) => {
       const client = getClient();
@@ -231,18 +315,20 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
 
   threads
     .command('search <query>')
-    .description('Search Threads posts by keyword')
+    .description('Search public Threads posts by keyword (needs threads_keyword_search approval; otherwise only your own posts)')
     .option('--limit <n>', 'Maximum results', '25')
+    .option('--search-type <type>', 'TOP or RECENT')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (query: string, opts) => {
       const client = getClient();
       const params: Record<string, string> = {
         q: query,
+        ...(opts.searchType ? { search_type: String(opts.searchType).toUpperCase() } : {}),
         fields: 'id,text,username,permalink,timestamp,media_type',
         limit: opts.limit,
       };
 
-      const response = await client.request('threads/search', { params, ...threadsApi() });
+      const response = await client.request('keyword_search', { params, ...threadsApi() });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 }

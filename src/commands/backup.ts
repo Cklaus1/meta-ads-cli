@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from 'fs';
 import { MetaClient, API_VERSION } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { applyAdsetBudgetSharing, BLOCKED_SMART_PROMOTION_TYPES } from './campaigns.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -15,7 +16,7 @@ const SNAPSHOT_VERSION = 1;
 
 const CAMPAIGN_FIELDS = 'id,name,objective,status,buying_type,daily_budget,lifetime_budget,'
   + 'spend_cap,bid_strategy,special_ad_categories,special_ad_category_country,pacing_type,'
-  + 'promoted_object,is_budget_schedule_enabled,smart_promotion_type';
+  + 'promoted_object,is_budget_schedule_enabled,is_adset_budget_sharing_enabled,smart_promotion_type';
 
 const ADSET_FIELDS = 'id,name,campaign_id,status,daily_budget,lifetime_budget,'
   + 'daily_min_spend_target,daily_spend_cap,lifetime_min_spend_target,lifetime_spend_cap,'
@@ -33,8 +34,10 @@ const CREATIVE_FIELDS = 'id,name,object_story_spec,asset_feed_spec,url_tags,'
 const CAMPAIGN_CREATE = new Set([
   'name', 'objective', 'status', 'buying_type', 'daily_budget', 'lifetime_budget',
   'spend_cap', 'bid_strategy', 'special_ad_categories', 'special_ad_category_country',
-  'pacing_type', 'promoted_object', 'smart_promotion_type',
+  'pacing_type', 'promoted_object', 'is_adset_budget_sharing_enabled',
 ]);
+// smart_promotion_type is snapshotted (to detect Advantage+ Shopping/App
+// campaigns) but never sent: Meta blocks creating those via the API.
 const ADSET_CREATE = new Set([
   'name', 'status', 'daily_budget', 'lifetime_budget', 'daily_min_spend_target',
   'daily_spend_cap', 'lifetime_min_spend_target', 'lifetime_spend_cap', 'targeting',
@@ -237,6 +240,7 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
       // Objects whose create call threw; their children are skipped.
       const failures: Array<{ type: string; id: string; error: string }> = [];
       const failedCreatives = new Set<string>();
+      const skippedCampaigns: Array<{ id: string; name: string; smart_promotion_type: string }> = [];
       let created = 0;
 
       let synthSeq = 0;
@@ -276,9 +280,20 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
 
       // 2. Campaigns.
       for (const camp of snap.campaigns) {
+        const promoType = String(camp.smart_promotion_type || '');
+        if (BLOCKED_SMART_PROMOTION_TYPES.has(promoType)) {
+          // Children are skipped below because the campaign has no new ID.
+          skippedCampaigns.push({ id: String(camp.id), name: String(camp.name ?? ''), smart_promotion_type: promoType });
+          warnings.push(
+            `Campaign ${camp.id} (${String(camp.name)}) skipped — it is an Advantage+ ${promoType === 'SMART_APP_PROMOTION' ? 'App' : 'Shopping'} `
+            + `campaign (${promoType}), which Meta no longer allows creating via the API. Recreate it as a standard campaign.`,
+          );
+          continue;
+        }
         const body = pick(camp, CAMPAIGN_CREATE);
         body.status = status;
         if (!body.special_ad_categories) body.special_ad_categories = JSON.stringify(['NONE']);
+        applyAdsetBudgetSharing(body);
         const failedBefore = failures.length;
         const newId = await create(`${accountId}/campaigns`, body, 'campaign', camp.id);
         if (newId) campaignMap[camp.id] = newId;
@@ -341,6 +356,7 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
         },
         failed_objects: failures.length,
         failures,
+        skipped_campaigns: skippedCampaigns,
         warnings,
       }, opts.output as OutputFormat));
       if (failures.length > 0) {

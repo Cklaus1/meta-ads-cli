@@ -55,7 +55,7 @@ export function registerAudienceCommands(program: Command, getClient: () => Meta
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
     .requiredOption('--name <name>', 'Audience name')
     .option('--description <desc>', 'Audience description')
-    .option('--subtype <type>', 'Audience subtype (CUSTOM, WEBSITE, APP, OFFLINE_CONVERSION)')
+    .option('--subtype <type>', 'Audience subtype (CUSTOM, WEBSITE, APP, ENGAGEMENT)')
     .option('--rule <json>', 'Audience rule as JSON')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
@@ -84,7 +84,7 @@ export function registerAudienceCommands(program: Command, getClient: () => Meta
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
     .requiredOption('--source-audience-id <id>', 'Source audience ID')
     .option('--name <name>', 'Audience name')
-    .option('--countries <countries>', 'Comma-separated target country codes (e.g., US,GB)')
+    .option('--countries <countries>', 'Deprecated: Meta ignores lookalike countries; location comes from the ad set targeting')
     .option('--ratio <ratio>', 'Lookalike ratio (0.01-0.20)', '0.01')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
@@ -92,9 +92,9 @@ export function registerAudienceCommands(program: Command, getClient: () => Meta
         throw new Error('Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
       }
       const client = getClient();
-      const countries: string[] = opts.countries
-        ? opts.countries.split(',').map((c: string) => c.trim().toUpperCase()).filter(Boolean)
-        : ['US'];
+      if (opts.countries) {
+        console.error('Warning: --countries is ignored. Meta no longer uses lookalike_spec country/location_spec (v26.0, all versions from 2026-09-01); set locations in the ad set targeting instead.');
+      }
       const ratio = parseFloat(opts.ratio);
       if (!Number.isFinite(ratio) || ratio < 0.01 || ratio > 0.2) {
         throw new Error('--ratio must be between 0.01 and 0.20');
@@ -104,12 +104,6 @@ export function registerAudienceCommands(program: Command, getClient: () => Meta
         ratio,
         origin: [{ id: opts.sourceAudienceId, type: 'custom_audience' }],
       };
-      // A single country uses `country`; several need a location_spec.
-      if (countries.length === 1) {
-        lookalikeSpec.country = countries[0];
-      } else {
-        lookalikeSpec.location_spec = { geo_locations: { countries } };
-      }
 
       const body: Record<string, string> = {
         name: opts.name || `Lookalike - ${opts.sourceAudienceId}`,

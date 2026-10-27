@@ -11,11 +11,15 @@ Every finding below was checked against the code at the cited `file:line`. The s
 All 35 findings below are fixed, along with the four pre-existing items listed above. `tsc --noEmit` is clean, and the suite has 271 tests, all passing. Follow-ups found during the fixes:
 - `retargeting frequency-optimization` read its options object as an ad set ID (fixed).
 - `workflow duplicate-and-test` doubled the budget the same way BUG-13 did (fixed: 50/50 split).
-- Open: `creatives update` still assumes a `link_data` story; `video_data`/`asset_feed_spec` creatives aren't handled.
-- Open: `threads search` uses `threads/search` (probably should be `keyword_search`, unverified).
-- Open: `leads list/export` use the user token; Meta may require a Page token.
-- Open: BUG-24 assumes Meta forbids editing `object_story_spec` on existing creatives. Not yet checked against the v25 docs.
-- Breaking changes: `pages delete-comment` and `messenger messages` now require `--page-id`.
+- Follow-ups (fixed in 0.3.0):
+  - `creatives update` now handles video, photo, catalog and dynamic creatives.
+  - `threads search` now uses `keyword_search` on `graph.threads.com`, per the Threads docs.
+  - Lead reads: Meta accepts a user token, but it needs `pages_manage_ads`, which login now requests.
+  - BUG-24: the AdCreative reference confirms only `name`, `status`, `adlabels` and `account_id` can be updated.
+  - `retargeting dynamic-campaign` now sets the catalog and a product audience.
+  - `doctor` warns about credential files other users can read.
+  - `auth`, `schema` and `generate-skills` actions are wrapped in `handleErrors()`.
+- Breaking changes are listed in [CHANGELOG.md](../CHANGELOG.md).
 
 ## Summary
 

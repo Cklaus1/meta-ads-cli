@@ -3,6 +3,36 @@ import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 
+/** Build a Graph field-expansion string, e.g. pricing_analytics.start(1).end(2).dimensions(A,B). */
+export function fieldExpansion(field: string, args: Record<string, string | string[] | undefined>): string {
+  let out = field;
+  for (const [k, v] of Object.entries(args)) {
+    if (v === undefined || (Array.isArray(v) && v.length === 0) || v === '') continue;
+    out += `.${k}(${Array.isArray(v) ? v.join(',') : v})`;
+  }
+  return out;
+}
+
+const ONE_YEAR_SEC = 365 * 86400;
+
+/**
+ * Validate a Unix-timestamp range for WhatsApp analytics. Meta limits
+ * messaging, conversation and pricing analytics to a 1-year lookback
+ * (since 2025-12-01).
+ */
+export function validateAnalyticsRange(start: string, end: string, nowSec = Math.floor(Date.now() / 1000)): void {
+  if (!/^\d+$/.test(start) || !/^\d+$/.test(end)) throw new Error('--start and --end must be Unix timestamps in seconds');
+  if (Number(end) <= Number(start)) throw new Error('--end must be after --start');
+  if (Number(start) < nowSec - ONE_YEAR_SEC) {
+    throw new Error('--start is more than 1 year ago; Meta limits WhatsApp analytics to a 1-year lookback.');
+  }
+}
+
+function list(value: unknown): string[] | undefined {
+  if (!value) return undefined;
+  return String(value).split(',').map(v => v.trim().toUpperCase()).filter(Boolean);
+}
+
 export function registerWhatsAppCommands(program: Command, getClient: () => MetaClient): void {
   const wa = program.command('whatsapp').alias('wa').description('WhatsApp Business: messaging, templates, analytics');
 
@@ -202,36 +232,72 @@ export function registerWhatsAppCommands(program: Command, getClient: () => Meta
     .description('Get WhatsApp Business Account analytics')
     .requiredOption('--start <timestamp>', 'Start Unix timestamp')
     .requiredOption('--end <timestamp>', 'End Unix timestamp')
-    .option('--granularity <g>', 'Granularity: HALF_HOUR, DAILY, MONTHLY', 'DAILY')
+    .option('--granularity <g>', 'Granularity: HALF_HOUR, DAY, MONTH', 'DAY')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (wabaId: string, opts) => {
+      validateAnalyticsRange(opts.start, opts.end);
+      // Messaging analytics uses DAY/MONTH (not DAILY/MONTHLY); accept either.
+      const granularity = ({ DAILY: 'DAY', MONTHLY: 'MONTH' } as Record<string, string>)[String(opts.granularity).toUpperCase()]
+        || String(opts.granularity).toUpperCase();
       const client = getClient();
-      const params: Record<string, string> = {
-        start: opts.start,
-        end: opts.end,
-        granularity: opts.granularity,
-      };
-      const response = await client.request(`${wabaId}/analytics`, { params });
+      const fields = fieldExpansion('analytics', { start: opts.start, end: opts.end, granularity });
+      const response = await client.request(wabaId, { params: { fields } });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
   wa
     .command('conversation-analytics <wabaId>')
-    .description('Get conversation-level analytics (costs, volumes)')
+    .description('Legacy: conversation-based analytics. Billing is per message since 2025-07-01; prefer pricing-analytics')
     .requiredOption('--start <timestamp>', 'Start Unix timestamp')
     .requiredOption('--end <timestamp>', 'End Unix timestamp')
     .option('--granularity <g>', 'Granularity: HALF_HOUR, DAILY, MONTHLY', 'DAILY')
-    .option('--dimension <dim>', 'Dimension: CONVERSATION, PHONE, COUNTRY')
+    .option('--dimension <dims>', 'Comma-separated dimensions: CONVERSATION_CATEGORY, CONVERSATION_TYPE, COUNTRY, PHONE')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (wabaId: string, opts) => {
+      validateAnalyticsRange(opts.start, opts.end);
       const client = getClient();
-      const params: Record<string, string> = {
+      const fields = fieldExpansion('conversation_analytics', {
         start: opts.start,
         end: opts.end,
-        granularity: opts.granularity,
-      };
-      if (opts.dimension) params.conversation_directions = opts.dimension;
-      const response = await client.request(`${wabaId}/conversation_analytics`, { params });
+        granularity: String(opts.granularity).toUpperCase(),
+        dimensions: list(opts.dimension),
+      });
+      const response = await client.request(wabaId, { params: { fields } });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  wa
+    .command('pricing-analytics <wabaId>')
+    .description('Per-message pricing analytics: cost and volume by pricing category/type (replaces conversation analytics)')
+    .requiredOption('--start <timestamp>', 'Start Unix timestamp (within the last year)')
+    .requiredOption('--end <timestamp>', 'End Unix timestamp')
+    .option('--granularity <g>', 'Granularity: HALF_HOUR, DAILY, MONTHLY', 'DAILY')
+    .option('--dimensions <dims>', 'Comma-separated breakdowns: COUNTRY, PHONE, PRICING_CATEGORY, PRICING_TYPE, TIER', 'PRICING_CATEGORY,PRICING_TYPE')
+    .option('--metric-types <types>', 'COST and/or VOLUME (default: both)')
+    .option('--pricing-categories <cats>', 'Filter: AUTHENTICATION, AUTHENTICATION_INTERNATIONAL, MARKETING, MARKETING_LITE, SERVICE, UTILITY, REFERRAL_CONVERSION')
+    .option('--pricing-types <types>', 'Filter: FREE_CUSTOMER_SERVICE, FREE_ENTRY_POINT, REGULAR')
+    .option('--phone-numbers <numbers>', 'Filter: comma-separated business phone numbers')
+    .option('--country-codes <codes>', 'Filter: comma-separated 2-letter country codes')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (wabaId: string, opts) => {
+      validateAnalyticsRange(opts.start, opts.end);
+      const granularity = String(opts.granularity).toUpperCase();
+      if (!['HALF_HOUR', 'DAILY', 'MONTHLY'].includes(granularity)) {
+        throw new Error('--granularity must be HALF_HOUR, DAILY or MONTHLY');
+      }
+      const client = getClient();
+      const fields = fieldExpansion('pricing_analytics', {
+        start: opts.start,
+        end: opts.end,
+        granularity,
+        phone_numbers: opts.phoneNumbers ? String(opts.phoneNumbers).split(',').map((v: string) => v.trim()) : undefined,
+        country_codes: list(opts.countryCodes),
+        metric_types: list(opts.metricTypes),
+        pricing_types: list(opts.pricingTypes),
+        pricing_categories: list(opts.pricingCategories),
+        dimensions: list(opts.dimensions),
+      });
+      const response = await client.request(wabaId, { params: { fields } });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 }
