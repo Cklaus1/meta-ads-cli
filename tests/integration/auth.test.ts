@@ -25,6 +25,9 @@ describe('AuthManager', () => {
 
   beforeEach(() => {
     process.env = { ...originalEnv };
+    // keytar is mocked; make sure the "no session bus" skip doesn't bypass it.
+    process.env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/mock';
+    delete process.env.META_ADS_CLI_NO_KEYCHAIN;
     delete process.env.META_ADS_CLI_ACCESS_TOKEN;
     delete process.env.META_ACCESS_TOKEN;
     delete process.env.META_ADS_CLI_APP_ID;
@@ -36,6 +39,16 @@ describe('AuthManager', () => {
 
   afterEach(() => {
     process.env = originalEnv;
+  });
+
+  describe('initialize', () => {
+    it('does not touch the keychain when an env token is set', async () => {
+      const keytar = await import('keytar');
+      (keytar.default.getPassword as ReturnType<typeof vi.fn>).mockClear();
+      process.env.META_ADS_CLI_ACCESS_TOKEN = 'env-token';
+      await new AuthManager().initialize();
+      expect(keytar.default.getPassword).not.toHaveBeenCalled();
+    });
   });
 
   describe('getToken', () => {

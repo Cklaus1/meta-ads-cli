@@ -7,22 +7,84 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+const CONVERSION_ACTION_TYPES = new Set([
+  'purchase', 'omni_purchase', 'offsite_conversion.fb_pixel_purchase', 'lead', 'onsite_conversion.lead_grouped',
+  'offsite_conversion.fb_pixel_lead', 'complete_registration', 'offsite_conversion.fb_pixel_complete_registration',
+]);
+
+type ActionList = Array<{ action_type?: string; value?: string | number }> | undefined;
+
+function sumActions(list: ActionList, filter?: (type: string) => boolean): number {
+  if (!Array.isArray(list)) return 0;
+  return list
+    .filter(a => !filter || filter(String(a.action_type || '')))
+    .reduce((sum, a) => sum + (parseFloat(String(a.value ?? 0)) || 0), 0);
+}
+
+/** Purchase ROAS from an insights row (Meta returns it as an action list). */
+export function getRoas(insight: Record<string, unknown>): number | undefined {
+  const list = insight.purchase_roas as ActionList;
+  if (!Array.isArray(list) || list.length === 0) return undefined;
+  const omni = list.find(a => a.action_type === 'omni_purchase');
+  return parseFloat(String((omni ?? list[0]).value ?? 0)) || 0;
+}
+
+/** Conversion count: the `conversions` field when present, else conversion-type actions. */
+export function getConversions(insight: Record<string, unknown>): number {
+  if (Array.isArray(insight.conversions)) return sumActions(insight.conversions as ActionList);
+  return sumActions(insight.actions as ActionList, t => CONVERSION_ACTION_TYPES.has(t));
+}
+
+function parseThreshold(value: string, name: string): number {
+  const n = Number(value);
+  if (value === '' || !Number.isFinite(n) || n < 0) throw new Error(`${name} must be a non-negative number, got: "${value}"`);
+  return n;
+}
+
+export interface PauseThresholds { maxCpc?: string; maxSpend?: string; minRoas?: string }
+
+/** Reasons an entity's insights breach the auto-pause thresholds (empty = keep running). */
+export function pauseReasons(insight: Record<string, unknown>, opts: PauseThresholds): string[] {
+  const reasons: string[] = [];
+  const spend = parseFloat(String(insight.spend || 0));
+  if (opts.maxCpc) {
+    const max = parseThreshold(opts.maxCpc, '--max-cpc');
+    const cpc = parseFloat(String(insight.cpc || 0));
+    if (cpc > max) reasons.push(`CPC ${cpc} > ${max}`);
+  }
+  if (opts.maxSpend) {
+    const max = parseThreshold(opts.maxSpend, '--max-spend');
+    if (spend > max) reasons.push(`Spend ${spend} > ${max}`);
+  }
+  if (opts.minRoas) {
+    const min = parseThreshold(opts.minRoas, '--min-roas');
+    // Only judge ROAS once something has been spent; no spend means no signal.
+    if (spend > 0) {
+      const roas = getRoas(insight) ?? 0;
+      if (roas < min) reasons.push(`ROAS ${roas} < ${min}`);
+    }
+  }
+  return reasons;
+}
+
 export function registerMonitoringCommands(program: Command, getClient: () => MetaClient): void {
   const monitoring = program.command('monitor').description('Real-time performance monitoring and automated alerts');
 
   monitoring
     .command('check <entityId>')
     .description('Check performance against alert thresholds for a campaign/adset')
-    .option('--max-cpc <value>', 'Alert if CPC exceeds this value')
-    .option('--min-ctr <value>', 'Alert if CTR drops below this value')
+    .option('--max-cpc <value>', 'Alert if CPC exceeds this value (account currency units, e.g. dollars — not cents)')
+    .option('--min-ctr <value>', 'Alert if CTR (percent) drops below this value')
     .option('--max-frequency <value>', 'Alert if frequency exceeds this value')
-    .option('--max-spend <value>', 'Alert if daily spend exceeds this value')
-    .option('--min-conversions <value>', 'Alert if conversions drop below this value')
+    .option('--max-spend <value>', 'Alert if spend in the --date-preset window exceeds this value (account currency units, not cents)')
+    .option('--min-conversions <value>', 'Alert if conversions in the window drop below this value')
+    .option('--date-preset <preset>', 'Insights window (Meta date_preset, e.g. today, yesterday, last_7d)', 'today')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (entityId: string, opts) => {
       const client = getClient();
       const params: Record<string, string> = {
         fields: 'impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,actions,conversions',
+        date_preset: opts.datePreset,
       };
 
       const response = await client.request(`${entityId}/insights`, { params });
@@ -54,9 +116,17 @@ export function registerMonitoringCommands(program: Command, getClient: () => Me
           alerts.push({ type: 'BUDGET_DEPLETION', severity: 'critical', message: `Spend ${spend} exceeds threshold ${opts.maxSpend}`, current: spend, threshold: parseFloat(opts.maxSpend) });
         }
       }
+      if (opts.minConversions) {
+        const min = parseThreshold(opts.minConversions, '--min-conversions');
+        const conversions = getConversions(data);
+        if (conversions < min) {
+          alerts.push({ type: 'LOW_CONVERSIONS', severity: 'warning', message: `Conversions ${conversions} below threshold ${min}`, current: conversions, threshold: min });
+        }
+      }
 
       console.log(formatOutput({
         entity_id: entityId,
+        date_preset: opts.datePreset,
         current_metrics: data,
         alerts_triggered: alerts.length,
         alerts,
@@ -68,14 +138,20 @@ export function registerMonitoringCommands(program: Command, getClient: () => Me
     .command('auto-pause')
     .description('Auto-pause entities that exceed thresholds')
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
-    .option('--max-cpc <value>', 'Pause if CPC exceeds this value')
-    .option('--max-spend <value>', 'Pause if spend exceeds this value')
-    .option('--min-roas <value>', 'Pause if ROAS drops below this value')
+    .option('--max-cpc <value>', 'Pause if CPC exceeds this value (account currency units, e.g. dollars — not cents)')
+    .option('--max-spend <value>', 'Pause if spend in the --date-preset window exceeds this value (account currency units, not cents)')
+    .option('--min-roas <value>', 'Pause if purchase ROAS drops below this value (only entities with spend > 0)')
+    .option('--date-preset <preset>', 'Insights window (Meta date_preset, e.g. today, yesterday, last_7d)', 'today')
     .option('--level <level>', 'Level: campaign, adset, ad', 'adset')
     .option('--confirm', 'Actually pause (without this flag, dry-run only)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
+      if (!opts.maxCpc && !opts.maxSpend && !opts.minRoas) {
+        throw new Error('Provide at least one threshold: --max-cpc, --max-spend or --min-roas');
+      }
+      // Validate thresholds up front, before any API calls.
+      pauseReasons({}, opts);
       const client = getClient();
 
       const listParams: Record<string, string> = {
@@ -90,43 +166,51 @@ export function registerMonitoringCommands(program: Command, getClient: () => Me
           ? `${opts.accountId}/ads`
           : `${opts.accountId}/adsets`;
 
-      const listResponse = await client.request(entityEndpoint, { params: listParams });
+      const listResponse = await client.requestAllPages(entityEndpoint, { params: listParams });
       const entities = (listResponse.data as Record<string, unknown>).data as Array<Record<string, unknown>> || [];
 
       const toPause: Array<{ id: string; name: string; reason: string }> = [];
 
       for (const entity of entities) {
         const insightResponse = await client.request(`${entity.id}/insights`, {
-          params: { fields: 'spend,cpc,actions,cost_per_action_type' },
+          params: { fields: 'spend,cpc,actions,cost_per_action_type,purchase_roas', date_preset: opts.datePreset },
         });
         const insight = ((insightResponse.data as Record<string, unknown>).data as unknown[])?.[0] as Record<string, unknown> || {};
 
-        const reasons: string[] = [];
-        if (opts.maxCpc && parseFloat(String(insight.cpc || 0)) > parseFloat(opts.maxCpc)) {
-          reasons.push(`CPC ${insight.cpc} > ${opts.maxCpc}`);
-        }
-        if (opts.maxSpend && parseFloat(String(insight.spend || 0)) > parseFloat(opts.maxSpend)) {
-          reasons.push(`Spend ${insight.spend} > ${opts.maxSpend}`);
-        }
+        const reasons = pauseReasons(insight, opts);
 
         if (reasons.length > 0) {
           toPause.push({ id: String(entity.id), name: String(entity.name), reason: reasons.join('; ') });
         }
       }
 
-      if (opts.confirm && toPause.length > 0) {
+      // Pause each entity independently, so one failure doesn't stop the rest.
+      const paused: string[] = [];
+      const failed: Array<{ id: string; error: string }> = [];
+      if (opts.confirm) {
         for (const item of toPause) {
-          await client.request(item.id, { method: 'POST', body: { status: 'PAUSED' } });
+          try {
+            await client.request(item.id, { method: 'POST', body: { status: 'PAUSED' } });
+            paused.push(item.id);
+          } catch (err) {
+            failed.push({ id: item.id, error: (err as Error).message });
+          }
         }
       }
 
       console.log(formatOutput({
         entities_checked: entities.length,
         entities_to_pause: toPause.length,
-        paused: opts.confirm,
+        date_preset: opts.datePreset,
+        confirm: Boolean(opts.confirm),
+        paused,
+        failed,
         details: toPause,
-        note: opts.confirm ? 'Entities have been paused' : 'Dry-run mode. Use --confirm to actually pause.',
+        note: opts.confirm
+          ? `Paused ${paused.length} of ${toPause.length} entities${failed.length ? `; ${failed.length} failed` : ''}`
+          : 'Dry-run mode. Use --confirm to actually pause.',
       }, opts.output as OutputFormat));
+      if (failed.length > 0) process.exitCode = 1;
     }));
 
   monitoring

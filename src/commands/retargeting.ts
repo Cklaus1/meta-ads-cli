@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { launchFailureMessage } from './workflows.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -202,41 +203,58 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
     .requiredOption('--product-set-id <id>', 'Product set ID')
     .requiredOption('--page-id <id>', 'Facebook Page ID')
     .option('--daily-budget <cents>', 'Daily budget in cents', '5000')
+    .option('--budget-level <level>', 'Where the budget lives: campaign (CBO) or adset', 'campaign')
+    .option('--countries <codes>', 'Comma-separated country codes for ad set targeting', 'US')
     .option('--objective <obj>', 'Campaign objective', 'OUTCOME_SALES')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
+      if (opts.budgetLevel !== 'campaign' && opts.budgetLevel !== 'adset') {
+        throw new Error(`--budget-level must be "campaign" or "adset", got: "${opts.budgetLevel}"`);
+      }
+      const countries = String(opts.countries).split(',').map((c: string) => c.trim().toUpperCase()).filter(Boolean);
+      if (countries.length === 0) throw new Error('--countries must list at least one country code');
       const client = getClient();
+      const created: Record<string, string> = {};
 
-      // Create campaign
+      // The budget goes on one level only: Meta rejects ad set budgets under a campaign budget.
       const campBody: Record<string, string> = {
         name: opts.campaignName,
         objective: opts.objective,
         status: 'PAUSED',
-        daily_budget: opts.dailyBudget,
         special_ad_categories: '[]',
       };
-      const campResponse = await client.request(`${opts.accountId}/campaigns`, { method: 'POST', body: campBody });
-      const campaignId = (campResponse.data as Record<string, unknown>).id as string;
-
-      // Create dynamic adset
       const adsetBody: Record<string, string> = {
-        campaign_id: campaignId,
         name: `${opts.campaignName} - Dynamic Retargeting`,
         optimization_goal: 'OFFSITE_CONVERSIONS',
         billing_event: 'IMPRESSIONS',
         status: 'PAUSED',
-        daily_budget: opts.dailyBudget,
         promoted_object: JSON.stringify({ product_set_id: opts.productSetId }),
+        targeting: JSON.stringify({ geo_locations: { countries } }),
         is_dynamic_creative: 'false',
       };
-      const adsetResponse = await client.request(`${opts.accountId}/adsets`, { method: 'POST', body: adsetBody });
+      if (opts.budgetLevel === 'campaign') campBody.daily_budget = opts.dailyBudget;
+      else adsetBody.daily_budget = opts.dailyBudget;
 
-      console.log(formatOutput({
-        campaign: campResponse.data,
-        adset: adsetResponse.data,
-        note: 'Dynamic retargeting campaign created. Add creatives and activate when ready.',
-      }, opts.output as OutputFormat));
+      try {
+        const campResponse = await client.request(`${opts.accountId}/campaigns`, { method: 'POST', body: campBody });
+        const campaignId = (campResponse.data as Record<string, unknown>).id as string;
+        if (campaignId) created.campaign_id = campaignId;
+
+        const adsetResponse = await client.request(`${opts.accountId}/adsets`, {
+          method: 'POST',
+          body: { ...adsetBody, campaign_id: campaignId },
+        });
+
+        console.log(formatOutput({
+          campaign: campResponse.data,
+          adset: adsetResponse.data,
+          budget_level: opts.budgetLevel,
+          note: 'Dynamic retargeting campaign created. Add creatives and activate when ready.',
+        }, opts.output as OutputFormat));
+      } catch (err) {
+        throw new Error(launchFailureMessage(err, created));
+      }
     }));
 
   retargeting
@@ -246,7 +264,8 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
     .option('--max-impressions <n>', 'Max impressions per user', '3')
     .option('--interval-days <days>', 'Frequency cap interval in days', '7')
     .option('-o, --output <format>', 'Output format', 'json')
-    .action(handleErrors(async (adsetId: string, opts) => {
+    .action(handleErrors(async (opts) => {
+      const adsetId = opts.adsetId as string;
       const client = getClient();
       const frequencyControlSpecs = [{
         event: 'IMPRESSIONS',

@@ -7,6 +7,41 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/**
+ * Parse a price like "29.99 USD", "29,99 EUR" or "1000 JPY" into Meta's
+ * minor-unit amount (cents for USD, whole yen for JPY) and currency.
+ */
+export function parsePrice(input: string, defaultCurrency = 'USD'): { amount: number; currency: string } {
+  const match = String(input).trim().match(/^([\d.,]+)\s*([A-Za-z]{3})?$/);
+  if (!match) {
+    throw new Error(`Invalid price "${input}". Expected e.g. "29.99 USD"`);
+  }
+  let num = match[1];
+  if (num.includes(',') && num.includes('.')) {
+    // "1,299.99": commas are thousands separators
+    num = num.replace(/,/g, '');
+  } else if (num.includes(',')) {
+    // "29,99" is a decimal comma; "1,299" is a thousands separator
+    num = /,\d{3}$/.test(num) ? num.replace(/,/g, '') : num.replace(',', '.');
+  }
+  if (!/^\d+(\.\d+)?$/.test(num)) {
+    throw new Error(`Invalid price "${input}". Expected e.g. "29.99 USD"`);
+  }
+  const currency = (match[2] || defaultCurrency).toUpperCase();
+  // Intl accepts any well-formed code, so check against the known list.
+  const known = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('currency');
+  if (known && !known.includes(currency)) {
+    throw new Error(`Unknown currency "${currency}" in price "${input}"`);
+  }
+  let digits: number;
+  try {
+    digits = new Intl.NumberFormat('en', { style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
+  } catch {
+    throw new Error(`Unknown currency "${currency}" in price "${input}"`);
+  }
+  return { amount: Math.round(Number(num) * 10 ** digits), currency };
+}
+
 export function registerCatalogCommands(program: Command, getClient: () => MetaClient): void {
   const catalog = program.command('catalog').description('Product catalog management');
 
@@ -135,9 +170,7 @@ export function registerCatalogCommands(program: Command, getClient: () => MetaC
       const client = getClient();
 
       // Parse price into value and currency
-      const priceParts = opts.price.split(' ');
-      const priceValue = Math.round(parseFloat(priceParts[0]) * 100);
-      const currency = priceParts[1] || 'USD';
+      const { amount: priceValue, currency } = parsePrice(opts.price);
 
       const body: Record<string, string> = {
         retailer_id: opts.retailerId,
@@ -154,12 +187,13 @@ export function registerCatalogCommands(program: Command, getClient: () => MetaC
       if (opts.brand) body.brand = opts.brand;
       if (opts.category) body.category = opts.category;
       if (opts.salePrice) {
-        const saleParts = opts.salePrice.split(' ');
-        body.sale_price = String(Math.round(parseFloat(saleParts[0]) * 100));
-        body.sale_price_currency = saleParts[1] || currency;
+        const sale = parsePrice(opts.salePrice, currency);
+        body.sale_price = String(sale.amount);
+        body.sale_price_currency = sale.currency;
       }
-      if (opts.customLabel_0) body.custom_label_0 = opts.customLabel_0;
-      if (opts.customLabel_1) body.custom_label_1 = opts.customLabel_1;
+      // Commander camel-cases --custom-label-0 to customLabel0
+      if (opts.customLabel0) body.custom_label_0 = opts.customLabel0;
+      if (opts.customLabel1) body.custom_label_1 = opts.customLabel1;
 
       const response = await client.request(`${opts.catalogId}/products`, {
         method: 'POST',
@@ -189,14 +223,15 @@ export function registerCatalogCommands(program: Command, getClient: () => MetaC
       if (opts.imageUrl) body.image_url = opts.imageUrl;
       if (opts.description) body.description = opts.description;
       if (opts.availability) body.availability = opts.availability;
+      let currency: string | undefined;
       if (opts.price) {
-        const priceParts = opts.price.split(' ');
-        body.price = String(Math.round(parseFloat(priceParts[0]) * 100));
-        body.currency = priceParts[1] || 'USD';
+        const price = parsePrice(opts.price);
+        body.price = String(price.amount);
+        body.currency = currency = price.currency;
       }
       if (opts.salePrice) {
-        const saleParts = opts.salePrice.split(' ');
-        body.sale_price = String(Math.round(parseFloat(saleParts[0]) * 100));
+        const sale = parsePrice(opts.salePrice, currency);
+        body.sale_price = String(sale.amount);
       }
 
       if (Object.keys(body).length === 0) {

@@ -8,6 +8,31 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/**
+ * Work out how to split a campaign-level budget between the control and the
+ * variant. Uses the same budget field as the original (daily or lifetime) and
+ * refuses campaigns without a campaign budget, rather than inventing one.
+ */
+export function planBudgetSplit(original: Record<string, unknown>, split: number): { field: 'daily_budget' | 'lifetime_budget'; control: number; variant: number } {
+  const field = Number(original.daily_budget) > 0 ? 'daily_budget'
+    : Number(original.lifetime_budget) > 0 ? 'lifetime_budget'
+      : null;
+  if (!field) {
+    throw new Error(
+      'The base campaign has no campaign-level budget (it uses ad set budgets), so the budget can\'t be split. '
+      + 'Use a campaign with a daily or lifetime campaign budget.',
+    );
+  }
+  const total = Number(original[field]);
+  const control = Math.round(total * split);
+  return { field, control, variant: total - control };
+}
+
+function copiedId(data: unknown): string | undefined {
+  const d = data as Record<string, unknown>;
+  return (d?.copied_campaign_id || d?.id) as string | undefined;
+}
+
 export function registerAbTestingCommands(program: Command, getClient: () => MetaClient): void {
   const abtest = program.command('ab-test').description('A/B testing for bid strategies and creatives');
 
@@ -30,34 +55,44 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
       const origParams: Record<string, string> = {
         fields: 'id,name,objective,status,daily_budget,lifetime_budget,bid_strategy,special_ad_categories',
       };
+      const split = Number(opts.budgetSplit);
+      if (!Number.isFinite(split) || split <= 0 || split >= 1) {
+        throw new Error(`--budget-split must be between 0 and 1 (exclusive), got: "${opts.budgetSplit}"`);
+      }
+
       const origResponse = await client.request(opts.campaignId, { params: origParams });
       const original = origResponse.data as Record<string, unknown>;
-      const totalBudget = parseInt(String(original.daily_budget || 10000));
-      const split = parseFloat(opts.budgetSplit);
+      // In dry-run the GET returns a placeholder, so there is no real budget to split.
+      const plan = original.dryRun
+        ? { field: 'daily_budget' as const, control: 0, variant: 0 }
+        : planBudgetSplit(original, split);
 
-      // Create variant A (control) — copy of original with adjusted budget
-      const controlBody: Record<string, string> = {
-        status_option: 'PAUSED',
-      };
+      // Create variant A (control) — copy of original
       const controlResponse = await client.request(`${opts.campaignId}/copies`, {
         method: 'POST',
-        body: controlBody,
+        body: { status_option: 'PAUSED' },
       });
+      const controlId = copiedId(controlResponse.data);
 
       // Create variant B with different bid strategy
       const variantCopyResponse = await client.request(`${opts.campaignId}/copies`, {
         method: 'POST',
         body: { status_option: 'PAUSED' },
       });
+      const variantId = copiedId(variantCopyResponse.data);
 
-      // Update variant B bid strategy
-      const variantId = ((variantCopyResponse.data as Record<string, unknown>).copied_campaign_id
-        || (variantCopyResponse.data as Record<string, unknown>).id) as string;
+      // Split the original budget across both copies, using the same budget field.
+      if (controlId) {
+        await client.request(controlId, {
+          method: 'POST',
+          body: { name: `${opts.name} - Control`, [plan.field]: String(plan.control) },
+        });
+      }
       if (variantId) {
         const updateBody: Record<string, string> = {
           name: `${opts.name} - Variant B (${opts.variantBidStrategy})`,
           bid_strategy: opts.variantBidStrategy,
-          daily_budget: String(Math.round(totalBudget * (1 - split))),
+          [plan.field]: String(plan.variant),
         };
         if (opts.variantBidAmount) updateBody.bid_cap = opts.variantBidAmount;
         await client.request(variantId, { method: 'POST', body: updateBody });
@@ -67,9 +102,13 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
         test_name: opts.name,
         control: controlResponse.data,
         variant: variantCopyResponse.data,
-        budget_split: { control: `${split * 100}%`, variant: `${(1 - split) * 100}%` },
+        budget_split: {
+          field: plan.field,
+          control: `${plan.control}¢ (${Math.round(split * 100)}%)`,
+          variant: `${plan.variant}¢ (${Math.round((1 - split) * 100)}%)`,
+        },
         duration_days: parseInt(opts.durationDays),
-        note: 'Both campaigns created as PAUSED. Activate both when ready to start the test.',
+        note: 'Both campaigns created as PAUSED. Activate both when ready to start the test, and pause the original campaign so it does not keep spending alongside them.',
       }, opts.output as OutputFormat));
     }));
 

@@ -92,13 +92,24 @@ export function registerAudienceCommands(program: Command, getClient: () => Meta
         throw new Error('Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
       }
       const client = getClient();
-      const countries = opts.countries ? opts.countries.split(',') : ['US'];
-      const lookalikeSpec = {
+      const countries: string[] = opts.countries
+        ? opts.countries.split(',').map((c: string) => c.trim().toUpperCase()).filter(Boolean)
+        : ['US'];
+      const ratio = parseFloat(opts.ratio);
+      if (!Number.isFinite(ratio) || ratio < 0.01 || ratio > 0.2) {
+        throw new Error('--ratio must be between 0.01 and 0.20');
+      }
+      const lookalikeSpec: Record<string, unknown> = {
         type: 'similarity',
-        country: countries[0],
-        ratio: parseFloat(opts.ratio),
+        ratio,
         origin: [{ id: opts.sourceAudienceId, type: 'custom_audience' }],
       };
+      // A single country uses `country`; several need a location_spec.
+      if (countries.length === 1) {
+        lookalikeSpec.country = countries[0];
+      } else {
+        lookalikeSpec.location_spec = { geo_locations: { countries } };
+      }
 
       const body: Record<string, string> = {
         name: opts.name || `Lookalike - ${opts.sourceAudienceId}`,
@@ -143,7 +154,7 @@ export function registerAudienceCommands(program: Command, getClient: () => Meta
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
       const client = getClient();
-      const ids = opts.audienceIds.split(',').map((id: string) => id.trim());
+      const ids: string[] = opts.audienceIds.split(',').map((id: string) => id.trim());
 
       // Fetch each audience's approximate count
       const results: unknown[] = [];

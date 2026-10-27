@@ -14,8 +14,8 @@ describe('resolveTimeRange', () => {
     expect(resolveTimeRange('')).toBeUndefined();
   });
 
-  it('returns undefined for unrecognized range', () => {
-    expect(resolveTimeRange('last_999d')).toBeUndefined();
+  it('throws for unrecognized range', () => {
+    expect(() => resolveTimeRange('last_999d')).toThrow('Unknown time range');
   });
 
   it('resolves "today" to same since/until', () => {
@@ -36,21 +36,21 @@ describe('resolveTimeRange', () => {
     vi.useFakeTimers({ now: new Date('2026-03-20T12:00:00Z') });
     const result = JSON.parse(resolveTimeRange('last_7d')!);
     expect(result.since).toBe('2026-03-13');
-    expect(result.until).toBe('2026-03-20');
+    expect(result.until).toBe('2026-03-19');
   });
 
   it('resolves "last_30d"', () => {
     vi.useFakeTimers({ now: new Date('2026-03-20T12:00:00Z') });
     const result = JSON.parse(resolveTimeRange('last_30d')!);
     expect(result.since).toBe('2026-02-18');
-    expect(result.until).toBe('2026-03-20');
+    expect(result.until).toBe('2026-03-19');
   });
 
   it('resolves "last_90d"', () => {
     vi.useFakeTimers({ now: new Date('2026-03-20T12:00:00Z') });
     const result = JSON.parse(resolveTimeRange('last_90d')!);
     expect(result.since).toBe('2025-12-20');
-    expect(result.until).toBe('2026-03-20');
+    expect(result.until).toBe('2026-03-19');
   });
 
   it('resolves "this_month"', () => {
@@ -65,6 +65,13 @@ describe('resolveTimeRange', () => {
     const result = JSON.parse(resolveTimeRange('last_month')!);
     expect(result.since).toBe('2026-02-01');
     expect(result.until).toBe('2026-02-28');
+  });
+
+  it('uses local calendar dates, not UTC, near midnight', () => {
+    // 23:30 local time on Mar 20, whatever the timezone.
+    vi.useFakeTimers({ now: new Date(2026, 2, 20, 23, 30) });
+    const result = JSON.parse(resolveTimeRange('today')!);
+    expect(result.since).toBe('2026-03-20');
   });
 
   it('returns valid JSON string', () => {

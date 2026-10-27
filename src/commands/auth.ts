@@ -1,6 +1,5 @@
 import { Command } from 'commander';
-import { AuthManager } from '../auth.js';
-import { API_VERSION } from '../meta-client.js';
+import { AuthManager, authScope } from '../auth.js';
 
 export function registerAuthCommands(program: Command, getAuth: () => AuthManager): void {
   const auth = program.command('auth').description('Authentication management');
@@ -78,42 +77,43 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
         console.error('No App ID configured. Set META_ADS_CLI_APP_ID or run: meta-ads auth setup');
         process.exit(1);
       }
-      const scope = 'business_management,public_profile,pages_show_list,pages_read_engagement,ads_management,ads_read,read_insights,leads_retrieval';
-      const url = `https://www.facebook.com/${API_VERSION}/dialog/oauth?client_id=${appId}&redirect_uri=${encodeURIComponent('http://localhost:8899/callback')}&scope=${scope}&response_type=token`;
+      const url = `https://www.facebook.com/${authManager.getApiVersion()}/dialog/oauth?client_id=${encodeURIComponent(appId)}`
+        + `&redirect_uri=${encodeURIComponent('http://localhost:8899/callback')}&scope=${encodeURIComponent(authScope())}&response_type=token`;
       console.log('\nOpen this URL in your browser to authenticate:\n');
       console.log(`  ${url}\n`);
     });
 
   auth
     .command('refresh-token')
-    .description('Refresh the current access token for extended validity')
-    .action(async () => {
+    .description('Exchange the current token for a long-lived one and cache it')
+    .option('--print', 'Also print the full new token to stdout (for piping)')
+    .action(async (opts) => {
       const authManager = getAuth();
       await authManager.initialize();
       try {
         const token = await authManager.getToken();
-        const appId = process.env.META_ADS_CLI_APP_ID || process.env.META_APP_ID || '';
-        const appSecret = process.env.META_ADS_CLI_APP_SECRET || process.env.META_APP_SECRET || '';
-
-        if (!appSecret) {
+        if (!authManager.getAppSecret()) {
           console.error('App Secret required for token refresh. Set META_ADS_CLI_APP_SECRET');
           process.exit(1);
         }
 
-        const url = `https://graph.facebook.com/${API_VERSION}/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${token}`;
-        const response = await fetch(url);
-        if (!response.ok) {
-          const err = await response.text();
-          console.error(`Token refresh failed: ${err}`);
+        const exchanged = await authManager.exchangeForLongLivedToken(token);
+        if (!exchanged) {
+          console.error('Token refresh failed: Meta did not return a new token.');
           process.exit(1);
         }
-        const data = await response.json() as { access_token: string; expires_in?: number };
-        console.log(`Token refreshed successfully.`);
-        if (data.expires_in) {
-          console.log(`Expires in: ${Math.round(data.expires_in / 86400)} days`);
+        await authManager.storeToken(exchanged.accessToken, exchanged.expiresIn);
+        if (opts.print) {
+          console.log(exchanged.accessToken);
+          return;
         }
-        console.log(`\nNew token: ${data.access_token.slice(0, 20)}...`);
-        console.log('\nTo use it, set: META_ADS_CLI_ACCESS_TOKEN=<token>');
+        console.log('Token refreshed and saved to the token cache.');
+        if (exchanged.expiresIn) {
+          console.log(`Expires in: ${Math.round(exchanged.expiresIn / 86400)} days`);
+        }
+        if (process.env.META_ADS_CLI_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN) {
+          console.log('\nNote: an access token env var is set and takes priority over the cache. Use --print to get the new token.');
+        }
       } catch (err) {
         console.error('Token refresh failed:', (err as Error).message);
         process.exit(1);

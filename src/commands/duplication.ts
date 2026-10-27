@@ -3,6 +3,11 @@ import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 
+/** Meta's /copies rename_options, so the copy gets the requested suffix. */
+function renameOptions(suffix: string): string {
+  return JSON.stringify({ rename_strategy: 'ONLY_TOP_LEVEL_RENAME', rename_suffix: suffix });
+}
+
 export function registerDuplicationCommands(program: Command, getClient: () => MetaClient): void {
   const dup = program.command('duplicate').alias('dup').description('Campaign, ad set, and ad duplication');
 
@@ -16,28 +21,10 @@ export function registerDuplicationCommands(program: Command, getClient: () => M
     .action(handleErrors(async (campaignId: string, opts) => {
       const client = getClient();
 
-      // Get original campaign
-      const origParams: Record<string, string> = {
-        fields: 'id,name,objective,status,daily_budget,lifetime_budget,bid_strategy,special_ad_categories,buying_type',
-      };
-      const origResponse = await client.request(campaignId, { params: origParams });
-      const original = origResponse.data as Record<string, unknown>;
-
-      // Create duplicate
-      const accountId = original.id ? String(original.id).split('_')[0] : '';
-      const body: Record<string, string> = {
-        name: `${original.name}${opts.nameSuffix}`,
-        objective: String(original.objective || ''),
-        status: opts.status,
-        special_ad_categories: JSON.stringify(original.special_ad_categories || []),
-      };
-      if (original.daily_budget) body.daily_budget = String(original.daily_budget);
-      if (original.lifetime_budget) body.lifetime_budget = String(original.lifetime_budget);
-      if (original.bid_strategy) body.bid_strategy = String(original.bid_strategy);
-
       // Copy campaign via the API's built-in copies endpoint
       const copyBody: Record<string, string> = {
         status_option: opts.status,
+        rename_options: renameOptions(opts.nameSuffix),
       };
       if (opts.deepCopy) {
         copyBody.deep_copy = 'true';
@@ -63,6 +50,7 @@ export function registerDuplicationCommands(program: Command, getClient: () => M
       const client = getClient();
       const copyBody: Record<string, string> = {
         status_option: opts.status,
+        rename_options: renameOptions(opts.nameSuffix),
       };
       if (opts.campaignId) {
         copyBody.campaign_id = opts.campaignId;
@@ -90,6 +78,7 @@ export function registerDuplicationCommands(program: Command, getClient: () => M
       const client = getClient();
       const copyBody: Record<string, string> = {
         status_option: opts.status,
+        rename_options: renameOptions(opts.nameSuffix),
       };
       if (opts.adsetId) {
         copyBody.adset_id = opts.adsetId;
@@ -111,13 +100,14 @@ export function registerDuplicationCommands(program: Command, getClient: () => M
     .option('--new-description <text>', 'Override description')
     .option('--new-cta <type>', 'Override call-to-action type')
     .option('--new-link-url <url>', 'Override destination URL')
+    .option('--account-id <id>', 'Ad account for the copy (default: the original creative\'s account)', process.env.META_ADS_CLI_ACCOUNT_ID || '')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (creativeId: string, opts) => {
       const client = getClient();
 
       // Get original creative
       const origParams: Record<string, string> = {
-        fields: 'id,name,object_story_spec,asset_feed_spec,image_hash,call_to_action_type',
+        fields: 'id,name,account_id,object_story_spec,asset_feed_spec,image_hash,call_to_action_type',
       };
       const origResponse = await client.request(creativeId, { params: origParams });
       const original = origResponse.data as Record<string, unknown>;
@@ -139,10 +129,9 @@ export function registerDuplicationCommands(program: Command, getClient: () => M
         body.object_story_spec = JSON.stringify(spec);
       }
 
-      // Get account ID from the creative
-      const accountId = process.env.META_ADS_CLI_ACCOUNT_ID;
+      const accountId = opts.accountId || (original.account_id ? `act_${original.account_id}` : '');
       if (!accountId) {
-        throw new Error('Account ID required for creative duplication. Set META_ADS_CLI_ACCOUNT_ID');
+        throw new Error('Account ID required for creative duplication. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
       }
 
       const response = await client.request(`${accountId}/adcreatives`, {

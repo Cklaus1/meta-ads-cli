@@ -1,10 +1,45 @@
 import { Command } from 'commander';
+import crypto from 'crypto';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
+}
+
+// Customer-information fields Meta requires to be normalized and SHA-256 hashed.
+const PII_NORMALIZERS: Record<string, (v: string) => string> = {
+  em: v => v.trim().toLowerCase(),
+  ph: v => v.replace(/\D/g, ''),
+  fn: v => v.trim().toLowerCase(),
+  ln: v => v.trim().toLowerCase(),
+  ct: v => v.toLowerCase().replace(/[^a-z0-9]/g, ''),
+  st: v => v.toLowerCase().replace(/[^a-z]/g, ''),
+  zp: v => v.toLowerCase().replace(/\s/g, ''),
+  db: v => v.replace(/\D/g, ''),
+  ge: v => v.trim().toLowerCase().charAt(0),
+  country: v => v.toLowerCase().replace(/[^a-z]/g, ''),
+};
+
+/**
+ * Normalize and SHA-256 hash the PII fields of a CAPI user_data object.
+ * Values that are already 64-char hex hashes are passed through unchanged.
+ */
+export function hashUserData(userData: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...userData };
+  const hashOne = (field: string, v: unknown): unknown => {
+    if (typeof v !== 'string' && typeof v !== 'number') return v;
+    const str = String(v);
+    if (/^[a-f0-9]{64}$/i.test(str)) return str.toLowerCase();
+    return crypto.createHash('sha256').update(PII_NORMALIZERS[field](str)).digest('hex');
+  };
+  for (const field of Object.keys(PII_NORMALIZERS)) {
+    const v = out[field];
+    if (v === undefined || v === null) continue;
+    out[field] = Array.isArray(v) ? v.map(x => hashOne(field, x)) : hashOne(field, v);
+  }
+  return out;
 }
 
 export function registerConversionCommands(program: Command, getClient: () => MetaClient): void {
@@ -16,7 +51,8 @@ export function registerConversionCommands(program: Command, getClient: () => Me
     .requiredOption('--pixel-id <id>', 'Meta Pixel ID')
     .requiredOption('--event-name <name>', 'Event name (Purchase, Lead, CompleteRegistration, AddToCart, ViewContent, etc.)')
     .option('--event-time <timestamp>', 'Unix timestamp (defaults to now)')
-    .option('--user-data <json>', 'User data JSON (em, ph, external_id, client_ip_address, fbp, fbc)')
+    .option('--user-data <json>', 'User data JSON (em, ph, fn, ln, ... are normalized and SHA-256 hashed automatically; external_id, client_ip_address, fbp, fbc)')
+    .option('--no-hash', 'Send user_data as given (values are already normalized and hashed)')
     .option('--custom-data <json>', 'Custom data JSON (value, currency, content_ids, content_type, num_items)')
     .option('--event-source-url <url>', 'URL where event occurred')
     .option('--action-source <source>', 'Action source (website, email, phone_call, chat, other)', 'website')
@@ -30,7 +66,10 @@ export function registerConversionCommands(program: Command, getClient: () => Me
         event_time: opts.eventTime ? parseInt(opts.eventTime) : Math.floor(Date.now() / 1000),
         action_source: opts.actionSource,
       };
-      if (opts.userData) eventData.user_data = JSON.parse(opts.userData);
+      if (opts.userData) {
+        const userData = JSON.parse(opts.userData);
+        eventData.user_data = opts.hash ? hashUserData(userData) : userData;
+      }
       if (opts.customData) eventData.custom_data = JSON.parse(opts.customData);
       if (opts.eventSourceUrl) eventData.event_source_url = opts.eventSourceUrl;
 
@@ -118,6 +157,7 @@ export function registerConversionCommands(program: Command, getClient: () => Me
     .requiredOption('--pixel-id <id>', 'Meta Pixel ID')
     .requiredOption('--events <json>', 'JSON array of event objects [{event_name, event_time, user_data, custom_data}, ...]')
     .option('--test-event-code <code>', 'Test event code from Events Manager')
+    .option('--no-hash', 'Send user_data as given (values are already normalized and hashed)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       const client = getClient();
@@ -130,6 +170,9 @@ export function registerConversionCommands(program: Command, getClient: () => Me
         }
         if (!event.action_source) {
           event.action_source = 'website';
+        }
+        if (opts.hash && event.user_data && typeof event.user_data === 'object') {
+          event.user_data = hashUserData(event.user_data as Record<string, unknown>);
         }
       }
 
@@ -151,6 +194,7 @@ export function registerConversionCommands(program: Command, getClient: () => Me
     .description('Send offline conversion events (in-store purchases, phone orders)')
     .requiredOption('--event-set-id <id>', 'Offline event set ID')
     .requiredOption('--events <json>', 'JSON array of offline event objects')
+    .option('--no-hash', 'Send user_data/match_keys as given (values are already normalized and hashed)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       const client = getClient();
@@ -159,6 +203,12 @@ export function registerConversionCommands(program: Command, getClient: () => Me
       for (const event of events) {
         if (!event.event_time) {
           event.event_time = Math.floor(Date.now() / 1000);
+        }
+        if (!opts.hash) continue;
+        for (const key of ['user_data', 'match_keys']) {
+          if (event[key] && typeof event[key] === 'object') {
+            event[key] = hashUserData(event[key] as Record<string, unknown>);
+          }
         }
       }
 

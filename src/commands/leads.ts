@@ -7,6 +7,35 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/**
+ * Turn each lead's field_data ([{name, values}]) into one column per field,
+ * joining multiple values with ';'. Every row gets every field column, so
+ * CSV/table headers line up even when leads answered different questions.
+ */
+export function pivotLeads(leads: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const fieldNames: string[] = [];
+  const pivoted = leads.map(lead => {
+    const { field_data: fieldData, ...rest } = lead;
+    const answers: Record<string, string> = {};
+    if (Array.isArray(fieldData)) {
+      for (const f of fieldData as Array<{ name?: string; values?: unknown[] }>) {
+        if (!f?.name) continue;
+        if (!fieldNames.includes(f.name)) fieldNames.push(f.name);
+        answers[f.name] = (f.values || []).map(String).join(';');
+      }
+    }
+    return { rest, answers };
+  });
+  return pivoted.map(({ rest, answers }) => {
+    const row: Record<string, unknown> = { ...rest };
+    for (const name of fieldNames) {
+      // Don't let a form field named e.g. "id" overwrite lead metadata.
+      row[name in rest ? `field_${name}` : name] = answers[name] ?? '';
+    }
+    return row;
+  });
+}
+
 export function registerLeadCommands(program: Command, getClient: () => MetaClient): void {
   const leads = program.command('leads').description('Lead form and lead management');
 
@@ -137,7 +166,8 @@ export function registerLeadCommands(program: Command, getClient: () => MetaClie
       };
 
       const response = await client.requestAllPages(`${formId}/leads`, { params }, 50);
-      console.log(formatOutput(response.data, opts.output as OutputFormat));
+      const rows = (response.data as Record<string, unknown>).data as Array<Record<string, unknown>> | undefined;
+      console.log(formatOutput(rows ? pivotLeads(rows) : response.data, opts.output as OutputFormat));
     }));
 
   leads
