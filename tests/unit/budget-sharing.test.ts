@@ -32,7 +32,7 @@ describe('is_adset_budget_sharing_enabled (META_API_UPDATES #2)', () => {
   });
 
   it('launch-campaign sets it only for --budget-level adset', () => {
-    const base = { name: 'L', objective: 'OUTCOME_TRAFFIC', dailyBudget: '500', optimizationGoal: 'LINK_CLICKS', billingEvent: 'IMPRESSIONS' };
+    const base = { name: 'L', objective: 'OUTCOME_TRAFFIC', dailyBudget: '500', optimizationGoal: 'LINK_CLICKS', billingEvent: 'IMPRESSIONS', countries: 'US' };
     expect(buildLaunchBodies({ ...base, budgetLevel: 'adset' }).campaignBody.is_adset_budget_sharing_enabled).toBe('false');
     expect(buildLaunchBodies({ ...base, budgetLevel: 'campaign' }).campaignBody.is_adset_budget_sharing_enabled).toBeUndefined();
   });
@@ -49,9 +49,9 @@ describe('is_adset_budget_sharing_enabled (META_API_UPDATES #2)', () => {
   it('bulk create-campaigns respects the config value, else defaults to false', async () => {
     const { client, request } = mockClient(ok);
     const config = JSON.stringify([
-      { name: 'A' },
-      { name: 'B', is_adset_budget_sharing_enabled: true },
-      { name: 'C', daily_budget: 500 },
+      { name: 'A', objective: 'OUTCOME_SALES' },
+      { name: 'B', objective: 'OUTCOME_SALES', is_adset_budget_sharing_enabled: true },
+      { name: 'C', objective: 'OUTCOME_SALES', daily_budget: 500 },
     ]);
     await run(registerBulkCommands, client, ['bulk', 'create-campaigns', '--account-id', 'act_1', '--config', config, '--delay-ms', '0']);
     const bodies = request.mock.calls.map(c => (c[1] as { body: Record<string, string> }).body);

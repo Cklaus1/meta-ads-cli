@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { parseJsonInput } from '../json-input.js';
 
 /** Build a Graph field-expansion string, e.g. pricing_analytics.start(1).end(2).dimensions(A,B). */
 export function fieldExpansion(field: string, args: Record<string, string | string[] | undefined>): string {
@@ -113,7 +114,7 @@ export function registerWhatsAppCommands(program: Command, getClient: () => Meta
         name: opts.templateName,
         language: { code: opts.language },
       };
-      if (opts.components) template.components = JSON.parse(opts.components);
+      if (opts.components) template.components = parseJsonInput(opts.components, '--components');
 
       const body: Record<string, string> = {
         messaging_product: 'whatsapp',

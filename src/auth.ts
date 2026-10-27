@@ -60,6 +60,21 @@ async function withKeychain<T>(fn: (k: Keytar) => Promise<T>): Promise<T | undef
   }
 }
 
+/** Read a secret from the OS keychain (undefined when unavailable or missing). */
+export async function keychainGet(account: string): Promise<string | undefined> {
+  const value = await withKeychain(k => k.getPassword(SERVICE_NAME, account));
+  return value ?? undefined;
+}
+
+/** Store a secret in the OS keychain. Returns false when the keychain isn't available. */
+export async function keychainSet(account: string, value: string): Promise<boolean> {
+  return Boolean(await withKeychain(async k => { await k.setPassword(SERVICE_NAME, account, value); return true; }));
+}
+
+export async function keychainDelete(account: string): Promise<void> {
+  await withKeychain(k => k.deletePassword(SERVICE_NAME, account));
+}
+
 function envToken(): string | undefined {
   return process.env.META_ADS_CLI_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN || undefined;
 }

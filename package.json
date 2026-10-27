@@ -1,15 +1,21 @@
 {
   "name": "meta-ads-cli",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A standalone CLI for Meta Ads (Facebook/Instagram) via the Graph API",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
     "meta-ads": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "docs/SPENDING_CAPS.md"
+  ],
   "scripts": {
     "build": "tsup",
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "prepare": "npm run build",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
@@ -17,7 +23,8 @@
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
     "test:integration": "vitest run tests/integration",
-    "test:e2e": "vitest run tests/e2e"
+    "test:e2e": "vitest run tests/e2e",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "meta",
@@ -26,13 +33,19 @@
     "ads",
     "cli",
     "graph-api",
-    "advertising"
+    "advertising",
+    "mcp",
+    "threads",
+    "whatsapp"
   ],
   "license": "CC-BY-NC-4.0",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.105.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "commander": "^11.1.0",
-    "dotenv": "^17.3.1",
+    "dotenv": "^17.3.1"
+  },
+  "optionalDependencies": {
     "keytar": "^7.9.0"
   },
   "devDependencies": {
@@ -44,5 +57,13 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cklaus1/meta-ads-cli.git"
+  },
+  "homepage": "https://github.com/Cklaus1/meta-ads-cli#readme",
+  "bugs": {
+    "url": "https://github.com/Cklaus1/meta-ads-cli/issues"
   }
 }

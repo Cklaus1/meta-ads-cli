@@ -41,19 +41,19 @@ describe('CLI E2E', () => {
 
   describe('help and version', () => {
     it('shows help with --help', async () => {
-      const { stdout } = await runCli(['--help']);
+      const { stdout, stderr } = await runCli(['--help']);
       expect(stdout).toContain('Meta Ads CLI');
       expect(stdout).toContain('campaigns');
       expect(stdout).toContain('--dry-run');
     });
 
     it('shows version with --version', async () => {
-      const { stdout } = await runCli(['--version']);
+      const { stdout, stderr } = await runCli(['--version']);
       expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
     });
 
     it('shows subcommand help', async () => {
-      const { stdout } = await runCli(['campaigns', '--help']);
+      const { stdout, stderr } = await runCli(['campaigns', '--help']);
       expect(stdout).toContain('list');
       expect(stdout).toContain('get');
       expect(stdout).toContain('create');
@@ -64,7 +64,7 @@ describe('CLI E2E', () => {
     it('shows help for all command groups', async () => {
       const groups = ['accounts', 'adsets', 'ads', 'creatives', 'insights', 'targeting', 'audiences'];
       for (const group of groups) {
-        const { stdout } = await runCli([group, '--help']);
+        const { stdout, stderr } = await runCli([group, '--help']);
         expect(stdout).toContain(group);
       }
     });
@@ -72,43 +72,43 @@ describe('CLI E2E', () => {
 
   describe('dry-run mode', () => {
     it('campaigns list dry-run shows request without executing', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['campaigns', 'list', '--account-id', 'act_123456', '--dry-run'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
       expect(stdout).toContain('GET');
       expect(stdout).toContain('act_123456');
     });
 
     it('accounts list dry-run', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['accounts', 'list', '--dry-run'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
       expect(stdout).toContain('GET');
     });
 
     it('adsets list dry-run', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['adsets', 'list', '--account-id', 'act_123', '--dry-run'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
       expect(stdout).toContain('GET');
     });
 
     it('ads list dry-run', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['ads', 'list', '--account-id', 'act_123', '--dry-run'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
     });
 
     it('campaign create dry-run shows POST', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         [
           'campaigns', 'create',
           '--account-id', 'act_123456',
@@ -118,43 +118,43 @@ describe('CLI E2E', () => {
         ],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
       expect(stdout).toContain('POST');
     });
 
     it('insights dry-run', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['insights', 'account', '--account-id', 'act_123', '--dry-run'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
     });
   });
 
   describe('output formats with dry-run', () => {
     it('json output (default)', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['campaigns', 'list', '--account-id', 'act_123', '-o', 'json', '--dry-run'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
       // Dry-run outputs the dry-run log, then the formatted data
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
     });
 
     it('table output', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['campaigns', 'list', '--account-id', 'act_123', '-o', 'table', '--dry-run'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
     });
 
     it('csv output', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['campaigns', 'list', '--account-id', 'act_123', '-o', 'csv', '--dry-run'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
     });
   });
 
@@ -185,19 +185,44 @@ describe('CLI E2E', () => {
     });
   });
 
+  describe('exit codes and JSON errors', () => {
+    it('usage errors exit 2', async () => {
+      const result = await runCliExpectFail(['nonexistent-command']);
+      expect(result.code).toBe(2);
+    });
+
+    it('policy/guard blocks exit 7 with a JSON error when asked', async () => {
+      const result = await runCliExpectFail(
+        ['--error-format', 'json', '--read-only', 'campaigns', 'update', '123', '--name', 'x'],
+        { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' },
+      );
+      expect(result.code).toBe(7);
+      const err = JSON.parse(result.stderr.trim().split('\n').pop()!);
+      expect(err.error).toMatchObject({ type: 'policy', exit_code: 7 });
+    });
+
+    it('dry-run keeps stdout as pure JSON', async () => {
+      const { stdout } = await runCli(
+        ['campaigns', 'list', '--account-id', 'act_123', '--dry-run'],
+        { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' },
+      );
+      expect(() => JSON.parse(stdout)).not.toThrow();
+    });
+  });
+
   describe('global options', () => {
     it('--api-version is accepted', async () => {
-      const { stdout } = await runCli(
+      const { stdout, stderr } = await runCli(
         ['campaigns', 'list', '--account-id', 'act_123', '--dry-run', '--api-version', 'v19.0'],
         { META_ADS_CLI_ACCESS_TOKEN: 'fake-token' }
       );
-      expect(stdout).toContain('[dry-run]');
+      expect(stderr).toContain('[dry-run]');
     });
   });
 
   describe('setup and schema commands (no auth needed)', () => {
     it('schema shows available services', async () => {
-      const { stdout } = await runCli(['schema']);
+      const { stdout, stderr } = await runCli(['schema']);
       expect(stdout).toContain('campaigns');
       expect(stdout).toContain('adsets');
     });

@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { parseJsonInput } from '../json-input.js';
 import { launchFailureMessage } from './workflows.js';
 import { applyAdsetBudgetSharing } from './campaigns.js';
 
@@ -50,6 +51,40 @@ export function buildDynamicRetargetingBodies(o: {
   };
 }
 
+export interface FunnelStage { name: string; event: string; retention: number }
+
+function pixelEventRule(pixelId: string, event: string, retentionDays: number): Record<string, unknown> {
+  return {
+    event_sources: [{ id: pixelId, type: 'pixel' }],
+    retention_seconds: retentionDays * 86400,
+    filter: { operator: 'and', filters: [{ field: 'event', operator: 'eq', value: event }] },
+  };
+}
+
+/**
+ * Website audience rules for a funnel, shallowest stage first. Each stage
+ * excludes everyone in a deeper stage (and, optionally, recent converters),
+ * so stages don't overlap and ad sets don't compete for the same people.
+ */
+export function buildFunnelRules(
+  pixelId: string,
+  stages: FunnelStage[],
+  converter?: { event: string; retentionDays: number },
+): Array<{ stage: string; rule: Record<string, unknown> }> {
+  return stages.map((stage, i) => {
+    const exclusions = stages.slice(i + 1).map(deeper => pixelEventRule(pixelId, deeper.event, deeper.retention));
+    if (converter) exclusions.push(pixelEventRule(pixelId, converter.event, converter.retentionDays));
+    const rule: Record<string, unknown> = {
+      inclusions: { operator: 'or', rules: [pixelEventRule(pixelId, stage.event, stage.retention)] },
+    };
+    if (exclusions.length) rule.exclusions = { operator: 'or', rules: exclusions };
+    return { stage: stage.name, rule };
+  });
+}
+
+/** Meta only accepts frequency_control_specs on ad sets optimized for these goals. */
+export const FREQUENCY_CAP_GOALS = ['REACH', 'THRUPLAY'];
+
 export function registerRetargetingCommands(program: Command, getClient: () => MetaClient): void {
   const retargeting = program.command('retargeting').alias('retar').description('Advanced retargeting audience and campaign strategies');
 
@@ -62,13 +97,18 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
     .option('--retention-days <days>', 'Days to retain users (1-180)', '30')
     .option('--rule <json>', 'Custom audience rule as JSON')
     .option('--url-contains <url>', 'URL contains filter')
-    .option('--exclude-converters', 'Exclude users who have converted')
+    .option('--exclude-converters', 'Exclude people who converted (see --converter-event) in the same window')
+    .option('--converter-event <event>', 'Pixel event that counts as converted', 'Purchase')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
       const client = getClient();
+      const retentionDays = parseInt(opts.retentionDays);
+      if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 180) {
+        throw new Error('--retention-days must be an integer from 1 to 180');
+      }
 
-      const rule = opts.rule ? opts.rule : JSON.stringify({
+      const ruleObj: Record<string, unknown> = opts.rule ? parseJsonInput<Record<string, unknown>>(opts.rule, '--rule') : {
         inclusions: {
           operator: 'or',
           rules: [{
@@ -80,7 +120,12 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
             } : { operator: 'and', filters: [{ field: 'event', operator: 'eq', value: 'PageView' }] },
           }],
         },
-      });
+      };
+      if (opts.excludeConverters) {
+        if (ruleObj.exclusions) throw new Error('--exclude-converters can\'t be combined with a --rule that already has exclusions');
+        ruleObj.exclusions = { operator: 'or', rules: [pixelEventRule(opts.pixelId, opts.converterEvent, retentionDays)] };
+      }
+      const rule = JSON.stringify(ruleObj);
 
       const body: Record<string, string> = {
         name: opts.name,
@@ -198,35 +243,40 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
 
   retargeting
     .command('funnel')
-    .description('Create multi-stage retargeting funnel (awareness → consideration → conversion)')
+    .description('Create non-overlapping funnel audiences (each stage excludes deeper stages, e.g. Visitors excludes Cart)')
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
     .requiredOption('--pixel-id <id>', 'Meta Pixel ID')
     .requiredOption('--funnel-name <name>', 'Funnel name prefix')
-    .option('--stages <json>', 'Funnel stages config as JSON array', '[{"name":"Visitors","event":"PageView","retention":30},{"name":"Engaged","event":"ViewContent","retention":14},{"name":"Cart","event":"AddToCart","retention":7}]')
+    .option('--stages <json>', 'Funnel stages, shallowest first, as JSON array (inline, @file or -)', '[{"name":"Visitors","event":"PageView","retention":30},{"name":"Engaged","event":"ViewContent","retention":14},{"name":"Cart","event":"AddToCart","retention":7}]')
+    .option('--exclude-converters', 'Also exclude people who converted (see --converter-event) from every stage')
+    .option('--converter-event <event>', 'Pixel event that counts as converted', 'Purchase')
+    .option('--converter-retention <days>', 'How long converters stay excluded', '30')
+    .option('--allow-overlap', 'Don\'t exclude deeper stages (old behaviour)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
       const client = getClient();
-      const stages = JSON.parse(opts.stages) as Array<{ name: string; event: string; retention: number }>;
+      const stages = parseJsonInput<FunnelStage[]>(opts.stages, '--stages');
+      if (!Array.isArray(stages) || stages.length === 0) throw new Error('--stages must be a non-empty JSON array');
+      for (const st of stages) {
+        if (!st.name || !st.event || !Number.isInteger(Number(st.retention)) || st.retention < 1 || st.retention > 180) {
+          throw new Error(`Invalid stage ${JSON.stringify(st)}: needs name, event and retention (1-180 days)`);
+        }
+      }
+      const converter = opts.excludeConverters
+        ? { event: opts.converterEvent, retentionDays: parseInt(opts.converterRetention) }
+        : undefined;
+      const rules = opts.allowOverlap
+        ? stages.map(stage => ({ stage: stage.name, rule: buildFunnelRules(opts.pixelId, [stage], converter)[0].rule }))
+        : buildFunnelRules(opts.pixelId, stages, converter);
       const results: unknown[] = [];
 
-      for (const stage of stages) {
-        const rule = {
-          inclusions: {
-            operator: 'or',
-            rules: [{
-              event_sources: [{ id: opts.pixelId, type: 'pixel' }],
-              retention_seconds: stage.retention * 86400,
-              filter: { operator: 'and', filters: [{ field: 'event', operator: 'eq', value: stage.event }] },
-            }],
-          },
-        };
-
+      for (const [i, stage] of stages.entries()) {
         const body: Record<string, string> = {
           name: `${opts.funnelName} - ${stage.name}`,
           subtype: 'WEBSITE',
           retention_days: String(stage.retention),
-          rule: JSON.stringify(rule),
+          rule: JSON.stringify(rules[i].rule),
           pixel_id: opts.pixelId,
         };
 
@@ -322,7 +372,7 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
 
   retargeting
     .command('frequency-optimization')
-    .description('Setup frequency capping for retargeting campaigns')
+    .description('Set a frequency cap on an ad set (Meta only allows caps on REACH or THRUPLAY ad sets)')
     .requiredOption('--adset-id <id>', 'Ad set ID')
     .option('--max-impressions <n>', 'Max impressions per user', '3')
     .option('--interval-days <days>', 'Frequency cap interval in days', '7')
@@ -330,6 +380,18 @@ export function registerRetargetingCommands(program: Command, getClient: () => M
     .action(handleErrors(async (opts) => {
       const adsetId = opts.adsetId as string;
       const client = getClient();
+      if (!client.isDryRun()) {
+        const adset = await client.request(adsetId, { params: { fields: 'optimization_goal' } });
+        const goal = String((adset.data as Record<string, unknown>).optimization_goal || '');
+        if (!FREQUENCY_CAP_GOALS.includes(goal)) {
+          throw new Error(
+            `Ad set ${adsetId} optimizes for ${goal || 'an unknown goal'}; Meta only accepts frequency caps on ad sets optimized for `
+            + `${FREQUENCY_CAP_GOALS.join(' or ')}. For conversion retargeting, instead: shorten the audience retention window, `
+            + 'exclude recent converters (retargeting website-behavior --exclude-converters), rotate creatives, '
+            + 'and watch frequency in insights; or run a separate Reach-optimized ad set with a cap.',
+          );
+        }
+      }
       const frequencyControlSpecs = [{
         event: 'IMPRESSIONS',
         interval_days: parseInt(opts.intervalDays),

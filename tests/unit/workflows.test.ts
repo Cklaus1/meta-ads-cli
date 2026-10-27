@@ -3,7 +3,7 @@ import { registerWorkflowCommands, buildLaunchBodies, launchFailureMessage } fro
 import { registerRetargetingCommands } from '../../src/commands/retargeting.js';
 import { mockClient, run } from './command-helpers.js';
 
-const launchOpts = { name: 'N', objective: 'OUTCOME_TRAFFIC', dailyBudget: '5000', optimizationGoal: 'LINK_CLICKS', billingEvent: 'IMPRESSIONS' };
+const launchOpts = { name: 'N', objective: 'OUTCOME_TRAFFIC', dailyBudget: '5000', optimizationGoal: 'LINK_CLICKS', billingEvent: 'IMPRESSIONS', countries: 'US' };
 
 describe('buildLaunchBodies', () => {
   it('puts the budget only on the campaign by default', () => {
@@ -39,7 +39,7 @@ describe('workflow launch-campaign', () => {
     });
     await expect(run(registerWorkflowCommands, client, [
       'workflow', 'launch-campaign', '--account-id', 'act_1', '--name', 'N', '--objective', 'OUTCOME_TRAFFIC',
-      '--daily-budget', '5000', '--creative-id', '5',
+      '--daily-budget', '5000', '--creative-id', '5', '--countries', 'US',
     ])).rejects.toThrow(/Invalid parameter[\s\S]*campaign_id=777/);
   });
 });

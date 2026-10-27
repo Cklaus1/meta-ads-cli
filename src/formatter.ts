@@ -27,7 +27,17 @@ function flattenObject(obj: Record<string, unknown>, prefix = ''): Record<string
     if (val === null || val === undefined) {
       result[fullKey] = '';
     } else if (Array.isArray(val)) {
-      if (val.length > 0 && typeof val[0] === 'object') {
+      const isActionList = val.length > 0 && val.every(item =>
+        typeof item === 'object' && item !== null
+        && typeof (item as Record<string, unknown>).action_type === 'string'
+        && (item as Record<string, unknown>).value !== undefined);
+      if (isActionList) {
+        // Insights action lists ({action_type, value}) become one column per
+        // action type, so CSV/table output keeps the numbers.
+        for (const item of val as Array<Record<string, unknown>>) {
+          result[`${fullKey}.${item.action_type}`] = String(item.value);
+        }
+      } else if (val.length > 0 && typeof val[0] === 'object') {
         const summaries = val.map((item) => {
           if (typeof item === 'object' && item !== null) {
             // {name, values} pairs (e.g. lead field_data) keep their values.

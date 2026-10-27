@@ -47,8 +47,13 @@ npm run test:watch         # Watch mode
 | `src/validate.ts` | Path safety, control char rejection, `act_` prefix validation, numeric entity ID validation |
 | `src/logger.ts` | JSON logger singleton. Level via `META_ADS_CLI_LOG_LEVEL`, file via `META_ADS_CLI_LOG_FILE` (daily rotation) |
 | `src/mime.ts` | `detectMimeType(filename)` — extension-based MIME detection for uploads |
-| `src/time-range.ts` | `resolveTimeRange()` — shared named time range resolution (last_7d, etc.) |
-| `src/profiles.ts` | Named profile management for multi-account config (`~/.config/meta-ads-cli/profiles.json`) |
+| `src/time-range.ts` | `insightsTimeParams()` — named ranges as Meta `date_preset` (account timezone) or `--since/--until`; legacy `resolveTimeRange()` |
+| `src/profiles.ts` | Named profile management for multi-account config (`~/.config/meta-ads-cli/profiles.json`), default profile, keychain-held secrets |
+| `src/policy.ts` | Safety policy file (allowlist, going-live/delete/messaging blocks, budget caps) enforced in `MetaClient` |
+| `src/journal.ts` | JSONL write journal with previous values, used by `journal undo` |
+| `src/metrics.ts` | Canonical action types (no double counting), result event by objective, derived cost per result / ROAS, volume floors, z-test |
+| `src/json-input.ts` | `parseJsonInput()` for JSON options: inline, `@file` or `-` (stdin). Use it for every JSON option |
+| `src/private-file.ts` | 0700 config dir and atomic 0600 writes for credential files |
 
 ### Command Pattern
 
@@ -69,7 +74,9 @@ export function registerXxxCommands(program: Command, getClient: () => MetaClien
 ```
 
 Key conventions:
-- Every command action wrapped in `handleErrors()`
+- Every command action wrapped in `handleErrors()`; throw `UsageError`/`PolicyError` etc. from `errors.ts` so exit codes stay meaningful
+- Results to stdout only; warnings and dry-run lines to stderr
+- Conversions/results/ROAS via `src/metrics.ts`, never by summing action types
 - Every command with API output uses `formatOutput()` with `-o` flag (default: `json`)
 - `getDefaultAccountId()` reads `META_ADS_CLI_ACCOUNT_ID` env var
 - POST requests: `{ method: 'POST', body: { ... } }` (url-encoded by MetaClient)
@@ -107,6 +114,11 @@ Key conventions:
 | `META_ADS_CLI_NO_KEYCHAIN` | Skip the OS keychain and use the file token cache only |
 | `META_ADS_CLI_AUTH_SCOPES` | Override the OAuth scope list requested by `auth login` |
 | `META_ADS_CLI_THREADS_ACCESS_TOKEN` | Threads token for `threads` commands (graph.threads.com) |
+| `META_ADS_CLI_POLICY_FILE` | Safety policy file (default `~/.config/meta-ads-cli/policy.json`) |
+| `META_ADS_CLI_JOURNAL_FILE` / `META_ADS_CLI_NO_JOURNAL` | Write journal path / disable it |
+| `META_ADS_CLI_ERROR_FORMAT` | `json` for machine-readable errors on stderr |
+| `META_ADS_CLI_BUSINESS_ID` | Business ID for `experiments` and `ab-test create --business-id` |
+| `META_ADS_CLI_DSA_BENEFICIARY` / `META_ADS_CLI_DSA_PAYOR` | Defaults for EU-targeted ad sets |
 | `META_ADS_CLI_ANTHROPIC_API_KEY` / `ANTHROPIC_API_KEY` | Enable LLM-backed `ai` commands (else falls back to local `claude` CLI or heuristics) |
 | `META_ADS_CLI_LOG_LEVEL` | debug, info, warn, error, none |
 | `META_ADS_CLI_LOG_FILE` | Log file path (daily rotation) |

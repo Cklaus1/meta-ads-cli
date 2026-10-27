@@ -91,7 +91,8 @@ describe('MetaClient', () => {
   describe('request - dry-run mode', () => {
     it('returns mock response without making API call', async () => {
       const dryClient = new MetaClient(auth, true);
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      // Dry-run notes go to stderr so stdout stays parseable.
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const result = await dryClient.request('me/campaigns', {
         params: { fields: 'id,name' },
@@ -106,7 +107,8 @@ describe('MetaClient', () => {
 
     it('logs body in dry-run POST', async () => {
       const dryClient = new MetaClient(auth, true);
-      const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      // Dry-run notes go to stderr so stdout stays parseable.
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       await dryClient.request('act_123/campaigns', {
         method: 'POST',

@@ -12,13 +12,34 @@ export function registerBrandedContentCommands(program: Command, getClient: () =
 
   bc
     .command('eligible-sponsors <instagramId>')
-    .description('List brands that can sponsor this creator\'s content')
+    .description('List partnership ad permissions for an Instagram account')
+    .option('--creator-username <username>', 'Only show permissions for this creator (sent as creator_username, and filtered locally)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (instagramId: string, opts) => {
       const client = getClient();
-      const response = await client.request(`${instagramId}/branded_content_ad_permissions`, {
-        params: { fields: 'id,username,name' },
-      });
+      const params: Record<string, string> = { fields: 'id,username,name' };
+      const username = opts.creatorUsername ? String(opts.creatorUsername).replace(/^@/, '') : undefined;
+      if (username) params.creator_username = username;
+      const response = await client.request(`${instagramId}/branded_content_ad_permissions`, { params });
+      const data = response.data as { data?: Array<Record<string, unknown>> };
+      if (username && Array.isArray(data.data)) {
+        data.data = data.data.filter(row => !row.username || String(row.username).toLowerCase() === username.toLowerCase());
+      }
+      console.log(formatOutput(data, opts.output as OutputFormat));
+    }));
+
+  bc
+    .command('request-permission <businessInstagramId>')
+    .description('Ask a creator for account-level partnership ads permission (the creator approves in Instagram)')
+    .option('--creator-username <username>', 'Creator\'s Instagram username')
+    .option('--creator-id <id>', 'Creator\'s Instagram account ID')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (businessInstagramId: string, opts) => {
+      if (!!opts.creatorUsername === !!opts.creatorId) throw new Error('Give exactly one of --creator-username or --creator-id');
+      const body: Record<string, string> = opts.creatorId
+        ? { creator_instagram_account: opts.creatorId }
+        : { creator_instagram_username: String(opts.creatorUsername).replace(/^@/, '') };
+      const response = await getClient().request(`${businessInstagramId}/branded_content_ad_permissions`, { method: 'POST', body });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 

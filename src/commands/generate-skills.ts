@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { handleErrors } from '../errors.js';
+import { describeCommandTree, type CliCommandSchema } from './schema.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -364,7 +365,83 @@ const SKILLS: SkillDef[] = [
   },
 ];
 
-function generateSkillMd(skill: SkillDef): string {
+// Hand-written examples keyed by top-level command; the command list itself
+// comes from the live command tree so skills never drift from the CLI.
+const CURATED = new Map(SKILLS.map(skill => [skill.command.replace(/^meta-ads\s*/, ''), skill]));
+const SHARED_SKILL = CURATED.get('')!;
+const SKIP_GROUPS = new Set(['help', 'generate-skills', 'completion']);
+
+interface GeneratedSkill extends SkillDef {
+  reference: CliCommandSchema[];
+}
+
+/** Build skills from the command tree: one per top-level group, plus the shared skill. */
+export function buildSkills(program: Command): { skills: GeneratedSkill[]; staleExamples: string[] } {
+  const tree = describeCommandTree(program);
+  const groups = program.commands.filter(c => !SKIP_GROUPS.has(c.name()));
+  const known = new Set(tree.map(c => c.name));
+  const staleExamples: string[] = [];
+
+  const keepExample = (example: string) => {
+    // Drop examples whose command path no longer exists.
+    const words = example.replace(/^meta-ads\s+/, '').split(/\s+/).filter(w => !w.startsWith('-'));
+    const ok = words.length === 0 || known.has(words[0]) && (words.length < 2 || !tree.some(c => c.name === words[0] && c.subcommands > 0) || known.has(`${words[0]} ${words[1]}`));
+    if (!ok) staleExamples.push(example);
+    return ok;
+  };
+
+  const skills: GeneratedSkill[] = groups.map(group => {
+    const name = group.name();
+    const curated = CURATED.get(name);
+    const reference = tree.filter(c => c.path[0] === name && c.subcommands === 0);
+    const subs = group.commands.map(c => c.name());
+    return {
+      name: `meta-ads-${name}`,
+      description: curated?.description || group.description() || `meta-ads ${name}`,
+      command: `meta-ads ${name}`,
+      examples: (curated?.examples || subs.slice(0, 3).map(sub => `meta-ads ${name} ${sub} --help`)).filter(keepExample),
+      reference,
+    };
+  });
+
+  for (const [key, skill] of CURATED) {
+    if (key && !groups.some(g => g.name() === key)) staleExamples.push(`(skill for missing command "${key}")`);
+    void skill;
+  }
+
+  skills.push({
+    ...SHARED_SKILL,
+    examples: [...SHARED_SKILL.examples, 'meta-ads schema --cli', 'meta-ads --read-only mcp'].filter(keepExample),
+    reference: [],
+  });
+  return { skills, staleExamples };
+}
+
+function formatReference(reference: CliCommandSchema[]): string {
+  if (reference.length === 0) return '';
+  const lines = ['## Commands', ''];
+  for (const cmd of reference) {
+    const args = cmd.arguments.map(a => (a.required ? `<${a.name}${a.variadic ? '...' : ''}>` : `[${a.name}${a.variadic ? '...' : ''}]`)).join(' ');
+    lines.push(`### \`meta-ads ${cmd.name}${args ? ` ${args}` : ''}\``, '');
+    if (cmd.description) lines.push(cmd.description, '');
+    const opts = cmd.options.filter(o => !/--output\b/.test(o.flags));
+    if (opts.length) {
+      lines.push('| Option | Description |', '|--------|-------------|');
+      for (const o of opts) {
+        const extras = [
+          o.required ? 'required' : '',
+          o.default !== undefined && o.default !== '' ? `default: \`${String(o.default)}\`` : '',
+          o.choices ? `one of: ${o.choices.join(', ')}` : '',
+        ].filter(Boolean).join('; ');
+        lines.push(`| \`${o.flags}\` | ${o.description.replace(/\|/g, '\\|')}${extras ? ` (${extras})` : ''} |`);
+      }
+      lines.push('');
+    }
+  }
+  return lines.join('\n');
+}
+
+function generateSkillMd(skill: GeneratedSkill, version: string): string {
   return `---
 name: ${skill.name}
 description: ${skill.description}
@@ -387,7 +464,10 @@ ${skill.examples.join('\n')}
 
 ## Output Formats
 
-All commands support \`-o\` / \`--output\` flag with: json, table, csv, text, yaml
+Commands with output support \`-o\` / \`--output\` with: json, table, csv, text, yaml
+
+${formatReference(skill.reference)}
+_Generated from meta-ads ${version}. Run \`meta-ads schema --cli\` for the full machine-readable command list._
 `;
 }
 
@@ -402,13 +482,15 @@ export function registerGenerateSkillsCommand(program: Command): void {
         fs.mkdirSync(outDir, { recursive: true });
       }
 
-      for (const skill of SKILLS) {
+      const { skills, staleExamples } = buildSkills(program);
+      const version = program.version() || '';
+      for (const skill of skills) {
         const skillDir = path.join(outDir, skill.name);
         if (!fs.existsSync(skillDir)) {
           fs.mkdirSync(skillDir, { recursive: true });
         }
 
-        const content = generateSkillMd(skill);
+        const content = generateSkillMd(skill, version);
         const filePath = path.join(skillDir, 'SKILL.md');
         fs.writeFileSync(filePath, content);
         console.log(`Generated: ${filePath}`);
@@ -421,13 +503,16 @@ export function registerGenerateSkillsCommand(program: Command): void {
         '| Skill | Description | Command |',
         '|-------|-------------|---------|',
       ];
-      for (const skill of SKILLS) {
+      for (const skill of skills) {
         indexLines.push(`| [${skill.name}](./${skill.name}/SKILL.md) | ${skill.description} | \`${skill.command}\` |`);
       }
-      indexLines.push('');
+      indexLines.push('', `_Generated from meta-ads ${version}: ${skills.length} skills._`, '');
       fs.writeFileSync(path.join(outDir, 'INDEX.md'), indexLines.join('\n'));
       console.log(`Generated: ${path.join(outDir, 'INDEX.md')}`);
 
-      console.log(`\nGenerated ${SKILLS.length} skill files + INDEX.md in ${outDir}`);
+      if (staleExamples.length) {
+        console.error(`Skipped ${staleExamples.length} stale example(s): ${staleExamples.join('; ')}`);
+      }
+      console.log(`\nGenerated ${skills.length} skill files + INDEX.md in ${outDir}`);
     }));
 }

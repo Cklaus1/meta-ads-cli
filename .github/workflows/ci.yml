@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      # keytar is optional; skip the OS keychain so tests never touch D-Bus.
+      - run: npm ci
+        env:
+          META_ADS_CLI_NO_KEYCHAIN: '1'
+      - run: npm run typecheck
+      - run: npm test
+        env:
+          META_ADS_CLI_NO_KEYCHAIN: '1'
+      - run: npm run build
+      - name: Smoke test the built CLI
+        run: |
+          node dist/index.js --help > /dev/null
+          node dist/index.js --version
+          node dist/index.js schema --cli > /dev/null
+        env:
+          META_ADS_CLI_NO_KEYCHAIN: '1'
+      - name: Check the npm package contents
+        run: npm pack --dry-run
