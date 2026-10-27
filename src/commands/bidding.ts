@@ -1,8 +1,8 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
-import { deriveMetrics, resultEventFor, PERFORMANCE_FIELDS, hasEnoughVolume, type DerivedMetrics } from '../metrics.js';
+import { handleErrors, PolicyError, UsageError } from '../errors.js';
+import { deriveMetrics, resultEventFor, PERFORMANCE_FIELDS, hasEnoughVolume, minorUnitFactor, type DerivedMetrics } from '../metrics.js';
 import { insightsTimeParams } from '../time-range.js';
 import { parseJsonInput } from '../json-input.js';
 
@@ -184,14 +184,103 @@ function rows(data: unknown): Array<Record<string, unknown>> {
 function parsePositive(value: unknown, flag: string): number | undefined {
   if (value === undefined) return undefined;
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) throw new Error(`${flag} must be a positive number, got: "${value}"`);
+  if (!Number.isFinite(n) || n <= 0) throw new UsageError(`${flag} must be a positive number, got: "${value}"`);
+  return n;
+}
+
+/** Non-negative number for volume floors; NaN would silently turn a floor off. */
+export function parseNonNegative(value: unknown, flag: string): number {
+  const n = Number(value);
+  if (value === undefined || value === '' || !Number.isFinite(n) || n < 0) {
+    throw new UsageError(`${flag} must be a number ≥ 0, got: "${value}"`);
+  }
   return n;
 }
 
 function parsePct(value: unknown, flag: string): number {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0 || n > 100) throw new Error(`${flag} must be between 0 and 100, got: "${value}"`);
+  if (!Number.isFinite(n) || n <= 0 || n > 100) throw new UsageError(`${flag} must be between 0 and 100, got: "${value}"`);
   return n;
+}
+
+// Presets whose length in days is known, for delivery-ratio math.
+export const PRESET_DAYS: Record<string, number> = {
+  today: 1, yesterday: 1, last_3d: 3, last_7d: 7, last_14d: 14, last_28d: 28, last_30d: 30, last_90d: 90,
+};
+
+export function presetDays(range: string, flag = '--time-range'): number {
+  const days = PRESET_DAYS[range];
+  if (!days) throw new UsageError(`${flag} must be one of ${Object.keys(PRESET_DAYS).join(', ')} here (a fixed number of days is needed), got: "${range}"`);
+  return days;
+}
+
+/** Currency of an ad account, cached per run. Undefined in dry-run (assumes 2 decimals). */
+const currencyCache = new Map<string, Promise<string | undefined>>();
+export function accountCurrency(client: MetaClient, accountId: unknown): Promise<string | undefined> {
+  if (!accountId || client.isDryRun()) return Promise.resolve(undefined);
+  const id = String(accountId).startsWith('act_') ? String(accountId) : `act_${accountId}`;
+  if (!currencyCache.has(id)) {
+    currencyCache.set(id, client.request(id, { params: { fields: 'currency' } })
+      .then(r => (r.data as Record<string, unknown>).currency as string | undefined)
+      .catch(() => undefined));
+  }
+  return currencyCache.get(id)!;
+}
+
+/** Offset (ms) of a timezone from UTC at an instant. */
+function tzOffsetMs(at: number, timeZone: string): number {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric', hourCycle: 'h23',
+    }).formatToParts(new Date(at)).filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]),
+  );
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - at;
+}
+
+/**
+ * Unix seconds for a wall-clock date/time in a timezone (the ad account's),
+ * so a schedule "from 2026-11-27" starts at midnight where the account runs.
+ */
+export function zonedToUnix(date: string, time: string, timeZone: string | undefined, flag: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new UsageError(`${flag}: use YYYY-MM-DD, got "${date}"`);
+  const [y, m, d] = date.split('-').map(Number);
+  const [hh, mm, ss] = time.split(':').map(Number);
+  const asUtc = Date.UTC(y, m - 1, d, hh, mm, ss);
+  if (!timeZone) return String(Math.floor(asUtc / 1000) + new Date(asUtc).getTimezoneOffset() * 60);
+  try {
+    // Two passes handle DST transitions near the date.
+    let t = asUtc - tzOffsetMs(asUtc, timeZone);
+    t = asUtc - tzOffsetMs(t, timeZone);
+    return String(Math.floor(t / 1000));
+  } catch {
+    return String(Math.floor(asUtc / 1000) + new Date(asUtc).getTimezoneOffset() * 60);
+  }
+}
+
+/**
+ * Budget in effect while a budget schedule runs. ABSOLUTE adds budget_value
+ * (minor units); MULTIPLIER raises the budget by budget_value percent.
+ */
+export function scheduledBudget(current: number, value: number, type: string): number {
+  return String(type).toUpperCase() === 'MULTIPLIER' ? Math.round(current * (1 + value / 100)) : current + value;
+}
+
+/** The spend cap applies to the budget a schedule produces, not just to the increase. */
+export function assertScheduleWithinCap(capCents: number, current: number, value: number, type: string, campaignId: string): void {
+  if (!capCents || !current) return;
+  const resulting = scheduledBudget(current, value, type);
+  if (resulting > capCents) {
+    throw new PolicyError(
+      `Spend-cap guard: the budget schedule on ${campaignId} would raise the budget to ${resulting}¢ during the period, `
+      + `above the spend cap of ${capCents}¢.`,
+    );
+  }
+}
+
+/** KPI used to judge a campaign: ROAS when it has revenue, else cost per result. */
+type KpiGroup = 'roas' | 'cost_per_result';
+function kpiGroup(s: Scored): KpiGroup {
+  return s.metrics.roas !== null ? 'roas' : 'cost_per_result';
 }
 
 /** Fetch learning_stage_info for every ad set in an account or campaign, keyed by ad set and campaign. */
@@ -226,6 +315,23 @@ interface Scored {
 function efficiency(s: Scored, useRoas: boolean): number {
   if (useRoas) return s.metrics.roas ?? 0;
   return s.metrics.cost_per_result ? 1 / s.metrics.cost_per_result : 0;
+}
+
+/** 'roas', 'cost_per_result', or 'mixed' when both groups were ranked. */
+function rankedBy(ranks: Map<Scored, { group: KpiGroup }>): string {
+  const groups = new Set([...ranks.values()].map(r => r.group));
+  return groups.size === 1 ? [...groups][0] : groups.size ? 'mixed' : 'cost_per_result';
+}
+
+/** Rank each campaign within the campaigns that share its KPI (ROAS vs cost per result). */
+export function rankWithinGroups(scored: Scored[]): Map<Scored, { group: KpiGroup; rank: number; size: number }> {
+  const out = new Map<Scored, { group: KpiGroup; rank: number; size: number }>();
+  for (const group of ['roas', 'cost_per_result'] as KpiGroup[]) {
+    const members = scored.filter(s => s.enoughVolume && kpiGroup(s) === group)
+      .sort((a, b) => efficiency(b, group === 'roas') - efficiency(a, group === 'roas'));
+    members.forEach((s, i) => out.set(s, { group, rank: i, size: members.length }));
+  }
+  return out;
 }
 
 export function registerBiddingCommands(program: Command, getClient: () => MetaClient): void {
@@ -369,6 +475,12 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       const client = getClient();
+      const value = parseNonNegative(opts.budgetValue, '--budget-value');
+      const cap = client.getMaxSpendCapCents();
+      if (cap && !client.isDryRun()) {
+        const c = (await client.request(opts.campaignId, { params: { fields: 'daily_budget,lifetime_budget' } })).data as Record<string, unknown>;
+        assertScheduleWithinCap(cap, Number(c.daily_budget || c.lifetime_budget || 0), value, opts.budgetType, opts.campaignId);
+      }
       const body: Record<string, string> = {
         budget_value: opts.budgetValue,
         budget_value_type: opts.budgetType,
@@ -403,7 +515,7 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
       const results: unknown[] = [];
 
       for (const id of ids) {
-        const res = await client.request(id, { params: { fields: 'id,name,daily_budget' } });
+        const res = await client.request(id, { params: { fields: 'id,name,daily_budget,account_id' } });
         const entity = res.data as Record<string, unknown>;
         const currentBudget = parseInt(String(entity.daily_budget || 0));
         if (!currentBudget && !client.isDryRun()) {
@@ -411,23 +523,30 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
           continue;
         }
         const increase = Math.round(currentBudget * adjustment / 100);
+        const cap = client.getMaxSpendCapCents();
         const plan: Record<string, unknown> = {
           campaign_id: id,
           campaign_name: entity.name,
           current_daily_budget: currentBudget,
           scheduled_increase_cents: increase,
           budget_during_period: currentBudget + increase,
+          ...(cap && currentBudget + increase > cap ? { exceeds_spend_cap: cap } : {}),
           pattern: opts.pattern,
           period: { start: opts.startDate, end: opts.endDate },
         };
         if (opts.apply) {
+          assertScheduleWithinCap(cap, currentBudget, increase, 'ABSOLUTE', id);
+          // Dates are calendar days in the ad account's timezone.
+          const tz = entity.account_id && !client.isDryRun()
+            ? ((await client.request(`act_${String(entity.account_id).replace(/^act_/, '')}`, { params: { fields: 'timezone_name' } })).data as Record<string, unknown>).timezone_name as string | undefined
+            : undefined;
           const created = await client.request(`${id}/budget_schedules`, {
             method: 'POST',
             body: {
               budget_value: String(increase),
               budget_value_type: 'ABSOLUTE',
-              time_start: toUnix(`${opts.startDate}T00:00:00`, '--start-date'),
-              time_end: toUnix(`${opts.endDate}T23:59:59`, '--end-date'),
+              time_start: zonedToUnix(opts.startDate, '00:00:00', tz, '--start-date'),
+              time_end: zonedToUnix(opts.endDate, '23:59:59', tz, '--end-date'),
             },
           });
           plan.schedule = created.data;
@@ -506,7 +625,7 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
       const targetCpa = parsePositive(opts.targetCpa, '--target-cpa');
       const targetRoas = parsePositive(opts.targetRoas, '--target-roas');
       const maxChange = parsePct(opts.maxChangePct, '--max-change-pct');
-      const floors = { minResults: Number(opts.minResults), minSpend: Number(opts.minSpend) };
+      const floors = { minResults: parseNonNegative(opts.minResults, '--min-results'), minSpend: parseNonNegative(opts.minSpend, '--min-spend') };
 
       const [insightsResponse, campaignsResponse, learning] = await Promise.all([
         client.requestAllPages(`${opts.accountId}/insights`, {
@@ -536,9 +655,9 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
         };
       });
 
-      const useRoas = targetRoas !== undefined || scored.some(s => s.metrics.revenue > 0);
-      const eligible = scored.filter(s => s.enoughVolume).sort((a, b) => efficiency(b, useRoas) - efficiency(a, useRoas));
-      const third = Math.max(1, Math.floor(eligible.length / 3));
+      // Each campaign is judged on its own KPI and ranked only against
+      // campaigns with the same KPI: lead or traffic campaigns have no ROAS.
+      const ranks = rankWithinGroups(scored);
 
       const plan = [];
       for (const s of scored) {
@@ -546,7 +665,12 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
         const current = Number(meta.daily_budget || 0);
         const reasons: string[] = [];
         let action = 'MAINTAIN';
-        const rank = eligible.indexOf(s);
+        const r = ranks.get(s);
+        const useRoas = r?.group === 'roas';
+        const rank = r?.rank ?? -1;
+        const groupSize = r?.size ?? 0;
+        const third = Math.max(1, Math.floor(groupSize / 3));
+        const target = useRoas ? targetRoas : targetCpa;
 
         if (!s.enoughVolume) {
           action = 'HOLD';
@@ -555,21 +679,25 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
           action = 'HOLD';
           reasons.push('An ad set is still in the learning phase; budget changes now would reset it.');
         } else {
+          const tooFewToRank = !target && groupSize < 2;
           const beatsTarget = useRoas
-            ? (targetRoas ? (s.metrics.roas ?? 0) >= targetRoas : rank < third)
+            ? (targetRoas ? (s.metrics.roas as number) >= targetRoas : rank < third)
             : (targetCpa ? (s.metrics.cost_per_result ?? Infinity) <= targetCpa : rank < third);
           const missesTarget = useRoas
-            ? (targetRoas ? (s.metrics.roas ?? 0) < targetRoas * 0.8 : rank >= eligible.length - third)
-            : (targetCpa ? (s.metrics.cost_per_result ?? Infinity) > targetCpa * 1.2 : rank >= eligible.length - third);
+            ? (targetRoas ? (s.metrics.roas as number) < targetRoas * 0.8 : rank >= groupSize - third)
+            : (targetCpa ? (s.metrics.cost_per_result ?? Infinity) > targetCpa * 1.2 : rank >= groupSize - third);
           const kpi = useRoas
             ? `ROAS ${s.metrics.roas?.toFixed(2) ?? 'n/a'}${targetRoas ? ` vs target ${targetRoas}` : ''}`
             : `cost per ${s.metrics.result_event} ${s.metrics.cost_per_result?.toFixed(2) ?? 'n/a'}${targetCpa ? ` vs target ${targetCpa}` : ''}`;
-          if (beatsTarget && !missesTarget) {
+          const peers = `${useRoas ? 'ROAS' : 'cost-per-result'} campaigns`;
+          if (tooFewToRank) {
+            reasons.push(`${kpi}; no other ${peers} to compare with and no target set.`);
+          } else if (beatsTarget && !missesTarget) {
             action = 'INCREASE';
-            reasons.push(`${kpi}${targetCpa || targetRoas ? '' : ' (top third of eligible campaigns)'}.`);
+            reasons.push(`${kpi}${target ? '' : ` (top third of eligible ${peers})`}.`);
           } else if (missesTarget) {
             action = 'DECREASE';
-            reasons.push(`${kpi}${targetCpa || targetRoas ? '' : ' (bottom third of eligible campaigns)'}.`);
+            reasons.push(`${kpi}${target ? '' : ` (bottom third of eligible ${peers})`}.`);
           } else {
             reasons.push(`${kpi}; within range.`);
           }
@@ -610,7 +738,8 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
       console.log(formatOutput({
         account_id: opts.accountId,
         window: opts.timeRange,
-        ranked_by: useRoas ? 'roas' : 'cost_per_result',
+        // Each campaign is ranked only against campaigns with the same KPI.
+        ranked_by: rankedBy(ranks),
         applied: Boolean(opts.apply),
         campaigns: plan,
       }, opts.output as OutputFormat));
@@ -675,13 +804,13 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
       const ids = adsetIds.split(',').map((id: string) => id.trim()).filter(Boolean);
       const targetCpa = parsePositive(opts.targetCpa, '--target-cpa');
       const maxChange = parsePct(opts.maxChangePct, '--max-change-pct');
-      const minResults = Number(opts.minResults);
-      const days = { last_7d: 7, last_30d: 30, last_90d: 90, yesterday: 1, today: 1 }[opts.timeRange as string] || 7;
+      const minResults = parseNonNegative(opts.minResults, '--min-results');
+      const days = presetDays(opts.timeRange);
       const adjustments: unknown[] = [];
 
       for (const id of ids) {
         const [adset, insights] = await Promise.all([
-          client.request(id, { params: { fields: 'id,name,bid_amount,bid_strategy,bid_constraints,daily_budget,optimization_goal,promoted_object,learning_stage_info,campaign{objective}' } }),
+          client.request(id, { params: { fields: 'id,name,account_id,bid_amount,bid_strategy,bid_constraints,daily_budget,optimization_goal,promoted_object,learning_stage_info,campaign{objective}' } }),
           client.request(`${id}/insights`, { params: { fields: PERFORMANCE_FIELDS, ...insightsTimeParams(opts.timeRange) } }),
         ]);
         const a = adset.data as Record<string, unknown>;
@@ -695,7 +824,9 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
         const learningStatus = (a.learning_stage_info as Record<string, string> | undefined)?.status;
         const currentBid = Number(a.bid_amount || 0);
         const roasFloorCurrent = Number((a.bid_constraints as Record<string, unknown> | undefined)?.roas_average_floor || 0);
-        const dailyBudget = Number(a.daily_budget || 0) / 100;
+        // Budgets and bids are in minor units; insights spend is in major units.
+        const factor = minorUnitFactor(await accountCurrency(client, a.account_id));
+        const dailyBudget = Number(a.daily_budget || 0) / factor;
         const delivery = dailyBudget ? m.spend / (dailyBudget * days) : null;
         const reasons: string[] = [];
         let action = 'no_change';
@@ -705,8 +836,10 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
           reasons.push('In the learning phase; bid edits would reset it.');
         } else if (m.results < minResults) {
           reasons.push(`Only ${m.results} ${event} results in the window (floor ${minResults}); not enough to judge.`);
+        } else if ((strategy === 'COST_CAP' || strategy === 'LOWEST_COST_WITH_BID_CAP') && currentBid <= 0) {
+          reasons.push('No current bid amount to adjust; set one with adsets update --bid-amount.');
         } else if (strategy === 'COST_CAP' || strategy === 'LOWEST_COST_WITH_BID_CAP') {
-          const target = targetCpa ?? currentBid / 100;
+          const target = targetCpa ?? currentBid / factor;
           const cpa = m.cost_per_result ?? Infinity;
           if (delivery !== null && delivery < 0.7 && cpa <= target) {
             action = 'raise_bid';
@@ -769,7 +902,8 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
       const client = getClient();
       const ids = opts.campaignIds.split(',').map((id: string) => id.trim()).filter(Boolean);
       const maxChange = parsePct(opts.maxChangePct, '--max-change-pct');
-      const minResults = Number(opts.minResults);
+      const minResults = parseNonNegative(opts.minResults, '--min-results');
+      const totalBudget = opts.totalBudget !== undefined ? parsePositive(opts.totalBudget, '--total-budget') : undefined;
       const entries: Array<Scored & { budget: number }> = [];
 
       for (const id of ids) {
@@ -789,18 +923,28 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
         });
       }
 
-      const useRoas = entries.some(e => e.metrics.revenue > 0);
-      const pool = opts.totalBudget ? Number(opts.totalBudget) : entries.reduce((s, e) => s + e.budget, 0);
+      const pool = totalBudget ?? entries.reduce((s, e) => s + e.budget, 0);
       const judged = entries.filter(e => e.enoughVolume);
+      const currentTotal = entries.reduce((s, e) => s + e.budget, 0);
+      // Unjudged campaigns keep their budget; the rest of the pool is split.
       const judgedPool = pool - entries.filter(e => !e.enoughVolume).reduce((s, e) => s + e.budget, 0);
-      const totalEff = judged.reduce((s, e) => s + efficiency(e, useRoas), 0);
+      const judgedCurrent = judged.reduce((s, e) => s + e.budget, 0);
+      // ROAS and cost per result aren't comparable, so each KPI group keeps its
+      // current share of the pool and is split by efficiency within the group.
+      const groups = new Map<KpiGroup, typeof judged>();
+      for (const e of judged) groups.set(kpiGroup(e), [...(groups.get(kpiGroup(e)) || []), e]);
 
       const allocation = entries.map(e => {
-        if (!e.enoughVolume || totalEff === 0) {
+        const group = kpiGroup(e);
+        const members = groups.get(group) || [];
+        const groupEff = members.reduce((s, m) => s + efficiency(m, group === 'roas'), 0);
+        if (!e.enoughVolume || groupEff === 0) {
           return { campaign_id: e.id, campaign_name: e.name, current_daily_budget: e.budget, proposed_daily_budget: e.budget, reason: 'Not enough results to judge; budget unchanged.' };
         }
-        const share = efficiency(e, useRoas) / totalEff;
-        const target = judgedPool * share;
+        const groupCurrent = members.reduce((s, m) => s + m.budget, 0);
+        const groupPool = judgedCurrent > 0 ? judgedPool * (groupCurrent / judgedCurrent) : judgedPool / groups.size;
+        const share = efficiency(e, group === 'roas') / groupEff;
+        const target = groupPool * share;
         const proposed = capChange(e.budget, target, maxChange);
         return {
           campaign_id: e.id,
@@ -811,13 +955,15 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
           current_daily_budget: e.budget,
           efficiency_share: Number((share * 100).toFixed(1)),
           proposed_daily_budget: proposed,
-          reason: `${useRoas ? 'ROAS' : 'Results per spend'} share ${(share * 100).toFixed(0)}% of the pool; change capped at ${maxChange}% per step.`,
+          kpi: group,
+          reason: `${group === 'roas' ? 'ROAS' : 'Results per spend'} share ${(share * 100).toFixed(0)}% among ${group === 'roas' ? 'campaigns with revenue' : 'cost-per-result campaigns'}; change capped at ${maxChange}% per step.`,
         };
       });
 
       console.log(formatOutput({
         pool_daily_budget: pool,
-        ranked_by: useRoas ? 'roas' : 'cost_per_result',
+        current_total_daily_budget: currentTotal,
+        ranked_by: 'roas within campaigns with revenue, cost per result within the rest',
         allocation,
         note: 'Campaigns that overlap in audience compete in the same auctions; consider consolidating them instead of splitting budget.',
       }, opts.output as OutputFormat));
@@ -859,7 +1005,7 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
         : targetCpa !== undefined ? (m.cost_per_result ?? Infinity) <= targetCpa
           : null;
 
-      if (m.results < Number(opts.minResults)) {
+      if (m.results < parseNonNegative(opts.minResults, '--min-results')) {
         scalingAction = 'gather_data';
         reasons.push(`Only ${m.results} ${event} results in the window; wait for at least ${opts.minResults} before scaling.`);
       } else if (learningStates.includes('LEARNING')) {
@@ -905,15 +1051,16 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
     .action(handleErrors(async (campaignId: string, opts) => {
       const client = getClient();
       const res = await client.request(campaignId, {
-        params: { fields: 'id,name,daily_budget,lifetime_budget,budget_remaining,start_time,stop_time,effective_status' },
+        params: { fields: 'id,name,account_id,daily_budget,lifetime_budget,budget_remaining,start_time,stop_time,effective_status' },
       });
       const c = res.data as Record<string, unknown>;
+      const factor = minorUnitFactor(await accountCurrency(client, c.account_id));
       const now = Date.now();
       const result: Record<string, unknown> = { campaign_id: campaignId, campaign_name: c.name, status: c.effective_status };
 
       if (Number(c.lifetime_budget) > 0) {
-        const lifetime = Number(c.lifetime_budget) / 100;
-        const remaining = Number(c.budget_remaining || 0) / 100;
+        const lifetime = Number(c.lifetime_budget) / factor;
+        const remaining = Number(c.budget_remaining || 0) / factor;
         const spent = lifetime - remaining;
         const start = Date.parse(String(c.start_time));
         const stop = Date.parse(String(c.stop_time));
@@ -934,7 +1081,7 @@ export function registerBiddingCommands(program: Command, getClient: () => MetaC
           result.note = 'No start/stop time to measure the flight against.';
         }
       } else if (Number(c.daily_budget) > 0) {
-        const daily = Number(c.daily_budget) / 100;
+        const daily = Number(c.daily_budget) / factor;
         const insights = await client.request(`${campaignId}/insights`, {
           params: { fields: 'spend', time_increment: '1', ...insightsTimeParams('last_7d') },
         });

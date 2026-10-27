@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { MetaClient } from '../meta-client.js';
+import { MetaClient, isPlaceholderId } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { assertCopyableCampaign } from './campaigns.js';
 import { handleErrors } from '../errors.js';
@@ -75,10 +75,18 @@ export function compareArms(a: DerivedMetrics, b: DerivedMetrics, opts: { alpha?
   };
 }
 
-function copiedId(data: unknown): string | undefined {
+/** ID of the copy from a /copies response (copied_campaign_id, or id under --plan/--validate). */
+export function copiedId(data: unknown): string | undefined {
   const d = data as Record<string, unknown>;
   return (d?.copied_campaign_id || d?.id) as string | undefined;
 }
+
+/**
+ * Body for copying a campaign with its ad sets and ads. Without deep_copy
+ * Meta copies only the campaign shell, so a test arm would have nothing to
+ * deliver.
+ */
+export const DEEP_COPY_BODY: Record<string, string> = { status_option: 'PAUSED', deep_copy: 'true' };
 
 export function registerAbTestingCommands(program: Command, getClient: () => MetaClient): void {
   const abtest = program.command('ab-test').description('A/B testing for bid strategies and creatives');
@@ -120,14 +128,14 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
       // Create variant A (control) — copy of original
       const controlResponse = await client.request(`${opts.campaignId}/copies`, {
         method: 'POST',
-        body: { status_option: 'PAUSED' },
+        body: { ...DEEP_COPY_BODY },
       });
       const controlId = copiedId(controlResponse.data);
 
       // Create variant B with different bid strategy
       const variantCopyResponse = await client.request(`${opts.campaignId}/copies`, {
         method: 'POST',
-        body: { status_option: 'PAUSED' },
+        body: { ...DEEP_COPY_BODY },
       });
       const variantId = copiedId(variantCopyResponse.data);
 
@@ -151,7 +159,11 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
       // A real split test divides the audience between the copies; without
       // it they compete in the same auction and the comparison is unreliable.
       let study: unknown = null;
-      if (opts.businessId && controlId && variantId) {
+      // Under --validate the copies weren't created, so a study over them would be rejected.
+      const placeholderArms = isPlaceholderId(controlId) || isPlaceholderId(variantId);
+      if (opts.businessId && controlId && variantId && placeholderArms && client.isValidateMode()) {
+        study = { skipped: true, reason: 'The copies were only validated, not created, so no split test was set up.' };
+      } else if (opts.businessId && controlId && variantId) {
         const start = toUnix(opts.start, '--start');
         const days = Number(opts.durationDays);
         const controlPct = Math.round(split * 100);

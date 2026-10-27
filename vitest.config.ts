@@ -11,5 +11,10 @@ export default defineConfig({
       exclude: ['src/index.ts', 'src/commands/**'],
     },
     testTimeout: 10000,
+    // Keep the developer's real policy and journal out of test runs.
+    env: {
+      META_ADS_CLI_POLICY_FILE: '/nonexistent/meta-ads-cli-test-policy.json',
+      META_ADS_CLI_NO_JOURNAL: '1',
+    },
   },
 });

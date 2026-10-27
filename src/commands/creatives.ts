@@ -332,11 +332,13 @@ function registerCreativeExtras(creatives: Command, getClient: () => MetaClient)
       const client = getClient();
       const formats = splitList(opts.format).map(f => f.toUpperCase());
       if (formats.length === 0) throw new Error('--format needs at least one ad_format');
+      // Parse once: a stdin spec ('-') can only be read a single time.
+      const spec = opts.spec ? JSON.stringify(parseJsonInput(opts.spec, '--spec')) : undefined;
       const previews: Array<{ format: string; body?: string }> = [];
       for (const format of formats) {
-        const response = opts.spec
+        const response = spec
           ? await client.request(`${id}/generatepreviews`, {
-            params: { ad_format: format, creative: JSON.stringify(parseJsonInput(opts.spec, '--spec')) },
+            params: { ad_format: format, creative: spec },
           })
           : await client.request(`${id}/previews`, { params: { ad_format: format } });
         const first = ((response.data as { data?: Array<{ body?: string }> }).data || [])[0];

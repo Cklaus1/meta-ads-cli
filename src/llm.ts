@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import type Anthropic from '@anthropic-ai/sdk';
 import { execSync } from 'node:child_process';
 import logger from './logger.js';
 
@@ -54,25 +54,26 @@ function anthropicKey(): string | undefined {
 class AnthropicProvider implements LlmProvider {
   readonly name = 'anthropic';
   readonly model: string;
-  private client: Anthropic;
+  private apiKey: string;
 
   constructor() {
     const apiKey = anthropicKey();
     if (!apiKey) throw new Error('No Anthropic API key configured.');
+    this.apiKey = apiKey;
     this.model = process.env.META_ADS_CLI_ANTHROPIC_MODEL || DEFAULT_ANTHROPIC_MODEL;
-    // An explicit key uses x-api-key; ANTHROPIC_AUTH_TOKEN uses bearer auth.
-    if (process.env.META_ADS_CLI_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY) {
-      this.client = new Anthropic({ apiKey });
-    } else {
-      this.client = new Anthropic({ authToken: apiKey });
-    }
   }
 
   async reasonStructured<T = unknown>(system: string, userContent: string, opts: ReasonOptions): Promise<T> {
     const maxTokens = opts.maxTokens ?? 8000;
     logger.info(`LLM(anthropic) model=${this.model} maxTokens=${maxTokens} effort=${opts.effort ?? 'high'}`);
+    // Loaded on first use so CLI startup doesn't pay for the SDK.
+    const { default: AnthropicSdk } = await import('@anthropic-ai/sdk');
+    // An explicit key uses x-api-key; ANTHROPIC_AUTH_TOKEN uses bearer auth.
+    const client = process.env.META_ADS_CLI_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY
+      ? new AnthropicSdk({ apiKey: this.apiKey })
+      : new AnthropicSdk({ authToken: this.apiKey });
     try {
-      const stream = this.client.messages.stream({
+      const stream = client.messages.stream({
         model: this.model,
         max_tokens: maxTokens,
         thinking: { type: 'adaptive' },
@@ -93,9 +94,9 @@ class AnthropicProvider implements LlmProvider {
       logger.info(`LLM(anthropic) ${message.usage.input_tokens} in / ${message.usage.output_tokens} out`);
       return JSON.parse(textBlock.text) as T;
     } catch (err) {
-      if (err instanceof Anthropic.AuthenticationError) throw new Error('Anthropic authentication failed — check your API key.');
-      if (err instanceof Anthropic.RateLimitError) throw new Error('Anthropic rate limit hit — wait a moment and retry.');
-      if (err instanceof Anthropic.APIError) throw new Error(`Anthropic API error (${err.status}): ${err.message}`);
+      if (err instanceof AnthropicSdk.AuthenticationError) throw new Error('Anthropic authentication failed — check your API key.');
+      if (err instanceof AnthropicSdk.RateLimitError) throw new Error('Anthropic rate limit hit — wait a moment and retry.');
+      if (err instanceof AnthropicSdk.APIError) throw new Error(`Anthropic API error (${err.status}): ${err.message}`);
       throw err;
     }
   }
@@ -211,6 +212,10 @@ class ClaudeCliProvider implements LlmProvider {
         '-p',
         '--model', this.model,
         '--output-format', 'json',
+        // The prompt contains untrusted ad text (names, comments, lead
+        // answers), so run with no tools or MCP servers: pure text in, text out.
+        '--tools', '',
+        '--strict-mcp-config',
       ], { stdio: ['pipe', 'pipe', 'pipe'] });
 
       const timer = setTimeout(() => {

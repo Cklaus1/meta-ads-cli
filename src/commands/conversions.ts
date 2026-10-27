@@ -9,18 +9,36 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/**
+ * Normalizers shared by Conversions API user_data and customer-list uploads,
+ * so the same person hashes the same way in both (and match rates line up).
+ * Names and cities keep Unicode letters (Meta hashes UTF-8: "München" stays
+ * "münchen", it doesn't become "mnchen").
+ */
+export const normalizePii = {
+  email: (v: string) => v.trim().toLowerCase(),
+  phone: (v: string) => v.replace(/\D/g, '').replace(/^0+/, ''),
+  name: (v: string) => v.trim().toLowerCase().replace(/[^\p{L}]/gu, ''),
+  city: (v: string) => v.trim().toLowerCase().replace(/[^\p{L}]/gu, ''),
+  state: (v: string) => v.toLowerCase().replace(/[^a-z]/g, ''),
+  zip: (v: string) => v.toLowerCase().replace(/\s/g, ''),
+  country: (v: string) => v.toLowerCase().replace(/[^a-z]/g, ''),
+  digits: (v: string) => v.replace(/\D/g, ''),
+  initial: (v: string) => v.trim().toLowerCase().charAt(0),
+};
+
 // Customer-information fields Meta requires to be normalized and SHA-256 hashed.
 const PII_NORMALIZERS: Record<string, (v: string) => string> = {
-  em: v => v.trim().toLowerCase(),
-  ph: v => v.replace(/\D/g, ''),
-  fn: v => v.trim().toLowerCase(),
-  ln: v => v.trim().toLowerCase(),
-  ct: v => v.toLowerCase().replace(/[^a-z0-9]/g, ''),
-  st: v => v.toLowerCase().replace(/[^a-z]/g, ''),
-  zp: v => v.toLowerCase().replace(/\s/g, ''),
-  db: v => v.replace(/\D/g, ''),
-  ge: v => v.trim().toLowerCase().charAt(0),
-  country: v => v.toLowerCase().replace(/[^a-z]/g, ''),
+  em: normalizePii.email,
+  ph: normalizePii.phone,
+  fn: normalizePii.name,
+  ln: normalizePii.name,
+  ct: normalizePii.city,
+  st: normalizePii.state,
+  zp: normalizePii.zip,
+  db: normalizePii.digits,
+  ge: normalizePii.initial,
+  country: normalizePii.country,
 };
 
 /**

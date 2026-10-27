@@ -25,12 +25,14 @@ export interface JournalEntry {
 }
 
 const SECRET_KEY = /token|secret|password/i;
+// Bulk payloads (customer lists, CAPI events, image bytes) hold personal data
+// or are huge; journal and plan output keep only a size and hash.
+const BULK_KEY = /^(payload|data|session|bytes|user_data|users|batch|file_content)$/i;
+const MAX_JOURNAL_BYTES = 10 * 1024 * 1024;
 
 export function journalPath(): string | undefined {
-  if (process.env.META_ADS_CLI_NO_JOURNAL) return undefined;
   if (process.env.META_ADS_CLI_JOURNAL_FILE) return process.env.META_ADS_CLI_JOURNAL_FILE;
-  // Keep test runs out of the developer's real journal.
-  if (process.env.VITEST) return undefined;
+  if (process.env.META_ADS_CLI_NO_JOURNAL) return undefined;
   return path.join(CONFIG_DIR, 'journal.jsonl');
 }
 
@@ -41,8 +43,18 @@ export function journalEnabled(): boolean {
 export function redact(fields: Record<string, string> | undefined): Record<string, string> | undefined {
   if (!fields) return undefined;
   const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(fields)) out[k] = SECRET_KEY.test(k) ? '[redacted]' : v;
+  for (const [k, v] of Object.entries(fields)) {
+    if (SECRET_KEY.test(k)) out[k] = '[redacted]';
+    else if (BULK_KEY.test(k) && typeof v === 'string' && v.length > 0) out[k] = summarize(v);
+    else out[k] = v;
+  }
   return out;
+}
+
+/** Replace a large or personal value with its size and hash. */
+export function summarize(value: string): string {
+  const hash = crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
+  return `[${value.length} chars, sha256:${hash}]`;
 }
 
 export function newJournalId(): string {
@@ -53,7 +65,12 @@ export function appendJournal(entry: JournalEntry): void {
   const file = journalPath();
   if (!file) return;
   try {
-    ensurePrivateDir(path.dirname(file));
+    // Only lock down our own config dir; a custom path's directory is the user's.
+    const dir = path.dirname(file);
+    if (path.resolve(dir) === path.resolve(CONFIG_DIR)) ensurePrivateDir(dir);
+    else if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Rotate once the journal gets large, keeping one previous file.
+    if (fs.existsSync(file) && fs.statSync(file).size > MAX_JOURNAL_BYTES) fs.renameSync(file, `${file}.1`);
     const existed = fs.existsSync(file);
     fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
     if (!existed) fs.chmodSync(file, 0o600);

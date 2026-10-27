@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.1 — 2026-10-27
+
+Fixes the 45 findings in [docs/BUG_SPEC_2.md](docs/BUG_SPEC_2.md).
+
+### Security and guardrails
+
+- **MCP:** tool arguments can no longer inject global flags. Values are passed as `--opt=value`, positionals can't start with `-`, and input is checked against the tool schema. The server's spend cap reaches tool calls through the environment, so it can only be lowered. `--allow-live`/`--allow-delete`/`--allow-messaging` work in tool calls only when the server was started with them. `--plan`, `--validate` and `--verbose` are forwarded. Long-running commands aren't exposed.
+- **Spend cap:**
+  - Repeated `--max-spend-cap` flags: the lowest wins.
+  - `--api-version` (flag, env or profile) must look like `v26.0`.
+  - `rules` can't create budget-raising or unpausing rules past the policy without explicit flags.
+  - Budget schedules are checked on the budget they produce, not the increase.
+  - `accounts set-spend-cap` sends currency units, as Meta expects.
+- **Policy:**
+  - Account checks fail closed when Meta can't be reached.
+  - `method=DELETE` in a body counts as a delete.
+  - The account daily budget ceiling serializes concurrent writes and counts every delivering status.
+  - A root-owned `/etc/meta-ads-cli/policy.json` always wins and can't be redirected by env vars. `policy show` checks the directory too.
+- **`@file`** refuses credential files (the config dir, `.env`, token cache) and is off in MCP tool calls. JSON parse errors no longer echo the input.
+- **Journal:** stores a size and hash instead of bulk payloads (customer lists, CAPI events, image bytes), rotates at 10 MB, leaves custom directories' permissions alone, and blocks double or out-of-order undo.
+- **Log file:** written synchronously with mode 0600.
+- **`claude` CLI fallback:** runs with no tools or MCP servers.
+
+### Fixes
+
+- **Login:** `auth login` asks only for the ads permissions again, because extra permissions made Meta reject the login ("Feature unavailable") for apps without those use cases. Add more with `META_ADS_CLI_AUTH_EXTRA_SCOPES`.
+- **Preview modes:** `--plan`, `--validate` and `--dry-run` hand out `planned_N` ids that later steps can use, so multi-step commands (`apply`, A/B tests, launch workflows, async reports) work in all three modes. `--validate` only sends `validate_only` where Meta supports it.
+- **Bulk:** the `--state-file` is ignored in preview modes and tied to the operation.
+- **Campaign copies** for A/B tests are deep copies.
+- **Optimizers:**
+  - zero-decimal currencies are handled
+  - ROAS and cost-per-result campaigns are ranked separately
+  - `--min-roas` only judges purchase-optimized entities
+- **`monitor watch`** no longer re-alerts on every check, retries failed pauses, and stops on auth or policy errors.
+- **Profiles:** a profile's `apiVersion` is used. A broken default profile only warns.
+- **Smaller fixes:**
+  - async insights reports work under `--read-only`
+  - `preflight` ignores paused children
+  - `plan`/`apply` converge on targeting
+  - catalog batch `item_type`
+  - lead CSV dedupe
+  - shared PII normalization
+  - date-window fixes
+  - the Anthropic SDK loads lazily
+
 ## 0.4.0 — 2026-10-27
 
 Implements the gaps in [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md) and [docs/MEDIA_BUYER_GAPS.md](docs/MEDIA_BUYER_GAPS.md), except the npm name and licence (owner decisions).

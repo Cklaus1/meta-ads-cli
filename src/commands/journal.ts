@@ -29,10 +29,24 @@ export function registerJournalCommands(program: Command, getClient: () => MetaC
   journal
     .command('undo <entryId>')
     .description('Restore the previous values recorded for a write')
+    .option('--force', 'Undo even if the object was changed again afterwards')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (entryId: string, opts) => {
-      const entry = readJournal().find(e => e.id === entryId);
+      const all = readJournal();
+      const index = all.findIndex(e => e.id === entryId);
+      const entry = all[index];
       if (!entry) throw new UsageError(`No journal entry "${entryId}". See: meta-ads journal list`);
+      if (entry.undo_of) throw new UsageError(`Entry ${entryId} is itself an undo; undo the original change instead.`);
+      if (all.some(e => e.undo_of === entryId && e.status === 'ok')) {
+        throw new UsageError(`Entry ${entryId} was already undone.`);
+      }
+      // Undoing an older change would overwrite newer edits to the same fields.
+      const touched = Object.keys(entry.previous || {});
+      const newer = all.slice(index + 1).find(e => e.status === 'ok' && e.endpoint === entry.endpoint
+        && Object.keys(e.body || {}).some(k => touched.includes(k)));
+      if (newer && !opts.force) {
+        throw new UsageError(`${entry.endpoint} was changed again later (entry ${newer.id}). Undo that first, or pass --force.`);
+      }
       if (entry.status !== 'ok') throw new UsageError(`Entry ${entryId} failed, so there is nothing to undo.`);
       if (!entry.previous || Object.keys(entry.previous).length === 0) {
         const hint = entry.result_id
@@ -45,7 +59,7 @@ export function registerJournalCommands(program: Command, getClient: () => MetaC
         body[k] = typeof v === 'string' ? v : JSON.stringify(v);
       }
       const client = getClient();
-      const response = await client.request(entry.endpoint, { method: 'POST', body });
+      const response = await client.request(entry.endpoint, { method: 'POST', body, undoOf: entryId });
       console.log(formatOutput({ undone: entryId, endpoint: entry.endpoint, restored: body, response: response.data }, opts.output as OutputFormat));
     }));
 }

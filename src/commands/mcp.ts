@@ -1,10 +1,18 @@
 import { Command } from 'commander';
 import { spawn } from 'child_process';
-import { handleErrors } from '../errors.js';
+import { handleErrors, UsageError } from '../errors.js';
 import { leafCommands, type CliCommandSchema } from './schema.js';
 
 // Commands that are interactive, print secrets, or manage this server.
-const EXCLUDED_ROOTS = new Set(['auth', 'setup', 'mcp', 'completion', 'profile', 'generate-skills', 'help']);
+const EXCLUDED_ROOTS = new Set(['auth', 'setup', 'mcp', 'completion', 'profile', 'generate-skills', 'help', 'policy']);
+// Commands that run until stopped (servers, watch loops) would just hit the tool timeout.
+const EXCLUDED_COMMANDS = new Set(['monitor watch', 'webhooks listen', 'journal undo']);
+
+/** Global flags the server knows how to pass to tool subprocesses. Others make `mcp` refuse to start. */
+export const HANDLED_GLOBALS = new Set([
+  'readOnly', 'dryRun', 'plan', 'validate', 'verbose', 'profile', 'maxSpendCap', 'apiVersion',
+  'allowLive', 'allowDelete', 'allowMessaging', 'errorFormat',
+]);
 
 export interface McpTool {
   name: string;
@@ -38,7 +46,7 @@ function globToRegExp(glob: string): RegExp {
 export function buildTools(program: Command, allow?: string): McpTool[] {
   const patterns = allow ? allow.split(',').filter(Boolean).map(globToRegExp) : undefined;
   return leafCommands(program)
-    .filter(cmd => !EXCLUDED_ROOTS.has(cmd.path[0]))
+    .filter(cmd => !EXCLUDED_ROOTS.has(cmd.path[0]) && !EXCLUDED_COMMANDS.has(cmd.path.join(' ')))
     .map(cmd => {
       const properties: Record<string, Record<string, unknown>> = {};
       const required: string[] = [];
@@ -70,14 +78,43 @@ export function buildTools(program: Command, allow?: string): McpTool[] {
     .filter(tool => !patterns || patterns.some(re => re.test(tool.name)));
 }
 
-/** Turn MCP tool arguments into CLI argv for the tool's command. */
+/** Check tool input against the tool's schema: known keys and expected types only. */
+export function validateToolInput(tool: McpTool, input: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(input)) {
+    const schema = tool.inputSchema.properties[key];
+    if (!schema) throw new UsageError(`Unknown argument "${key}" for ${tool.name}`);
+    if (value === undefined || value === null) continue;
+    const type = schema.type;
+    const ok = type === 'boolean' ? typeof value === 'boolean'
+      : type === 'array' ? Array.isArray(value) && value.every(v => typeof v === 'string' || typeof v === 'number')
+        : typeof value === 'string' || typeof value === 'number';
+    if (!ok) throw new UsageError(`Argument "${key}" for ${tool.name} must be ${type === 'array' ? 'a list of strings' : `a ${type}`}`);
+    if (schema.enum && !(schema.enum as unknown[]).includes(value)) {
+      throw new UsageError(`Argument "${key}" for ${tool.name} must be one of: ${(schema.enum as unknown[]).join(', ')}`);
+    }
+  }
+  for (const key of tool.inputSchema.required) {
+    if (input[key] === undefined || input[key] === null) throw new UsageError(`Missing required argument "${key}" for ${tool.name}`);
+  }
+}
+
+/**
+ * Turn MCP tool arguments into CLI argv for the tool's command. Option values
+ * are passed as --opt=value and positionals may not start with "-", so a
+ * value can never be parsed as a flag (e.g. a global guardrail override).
+ */
 export function toolArgv(tool: McpTool, input: Record<string, unknown>, globalArgs: string[], extra: string[]): string[] {
   const argv = [...globalArgs, ...tool.command.path];
+  const positional = (value: unknown, name: string) => {
+    const str = String(value);
+    if (str.startsWith('-')) throw new UsageError(`Argument "${name}" can't start with "-"`);
+    return str;
+  };
   for (const arg of tool.command.arguments) {
     const value = input[arg.name];
     if (value === undefined || value === null) continue;
-    if (Array.isArray(value)) argv.push(...value.map(String));
-    else argv.push(String(value));
+    if (Array.isArray(value)) argv.push(...value.map(v => positional(v, arg.name)));
+    else argv.push(positional(value, arg.name));
   }
   for (const opt of tool.command.options) {
     const prop = optionProperty(opt.flags);
@@ -87,7 +124,7 @@ export function toolArgv(tool: McpTool, input: Record<string, unknown>, globalAr
     if (opt.type === 'boolean') {
       if (value === true) argv.push(long);
     } else if (value !== undefined && value !== null) {
-      argv.push(long, typeof value === 'string' ? value : JSON.stringify(value));
+      argv.push(`${long}=${typeof value === 'string' ? value : JSON.stringify(value)}`);
     }
   }
   return [...argv, ...extra];
@@ -99,18 +136,35 @@ export function forwardedGlobals(program: Command): string[] {
   const args: string[] = [];
   if (g.readOnly) args.push('--read-only');
   if (g.dryRun) args.push('--dry-run');
-  if (g.profile) args.push('--profile', String(g.profile));
-  if (g.maxSpendCap) args.push('--max-spend-cap', String(g.maxSpendCap));
-  if (g.apiVersion) args.push('--api-version', String(g.apiVersion));
+  if (g.plan) args.push('--plan');
+  if (g.validate) args.push('--validate');
+  if (g.verbose) args.push('--verbose');
+  if (g.profile) args.push(`--profile=${g.profile}`);
+  if (g.apiVersion) args.push(`--api-version=${g.apiVersion}`);
   return args;
 }
 
-function runCli(argv: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+/**
+ * Env for tool subprocesses. The spend cap goes through the env, where it is
+ * min-combined with any other cap, so nothing in argv can raise it; --allow-*
+ * are honoured in the child only if the server was started with them.
+ */
+export function childEnv(program: Command, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const g = program.opts();
+  const env: NodeJS.ProcessEnv = { ...base, META_ADS_CLI_MCP_CHILD: '1' };
+  const caps = [g.maxSpendCap, base.META_ADS_CLI_MAX_SPEND_CAP].map(Number).filter(c => Number.isFinite(c) && c > 0);
+  if (caps.length) env.META_ADS_CLI_MAX_SPEND_CAP = String(Math.min(...caps));
+  const allow = [g.allowLive && 'live', g.allowDelete && 'delete', g.allowMessaging && 'messaging'].filter(Boolean);
+  env.META_ADS_CLI_MCP_ALLOW = allow.join(',');
+  return env;
+}
+
+function runCli(argv: string[], timeoutMs: number, env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise(resolve => {
     // execArgv keeps loaders (e.g. tsx in dev) for the subprocess.
     const child = spawn(process.execPath, [...process.execArgv, process.argv[1], ...argv], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: process.env,
+      env,
     });
     let stdout = '';
     let stderr = '';
@@ -150,6 +204,12 @@ auth, setup, profile, completion and generate-skills are never exposed.`)
       const timeoutMs = Number(opts.toolTimeout) * 1000;
       if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('--tool-timeout must be a positive number of seconds');
 
+      // Refuse global flags the server wouldn't pass on, so a guardrail can't silently drop.
+      const unhandled = Object.entries(program.opts())
+        .filter(([k, v]) => v !== undefined && v !== false && !HANDLED_GLOBALS.has(k)).map(([k]) => k);
+      if (unhandled.length) throw new UsageError(`mcp can't forward these global options to tool calls: ${unhandled.join(', ')}`);
+      const env = childEnv(program);
+
       const tools = buildTools(program, opts.tools);
       if (tools.length === 0) throw new Error(`No tools match --tools "${opts.tools}"`);
       const byName = new Map(tools.map(t => [t.name, t]));
@@ -178,8 +238,15 @@ auth, setup, profile, completion and generate-skills are never exposed.`)
         const extra: string[] = [];
         if (tool.command.options.some(o => optionProperty(o.flags) === 'output')) extra.push('-o', 'json');
         if (supportsErrorFormat) extra.unshift('--error-format', 'json');
-        const argv = toolArgv(tool, (request.params.arguments ?? {}) as Record<string, unknown>, globals, extra);
-        const result = await runCli(argv, timeoutMs);
+        let argv: string[];
+        try {
+          const input = (request.params.arguments ?? {}) as Record<string, unknown>;
+          validateToolInput(tool, input);
+          argv = toolArgv(tool, input, globals, extra);
+        } catch (err) {
+          return { isError: true, content: [{ type: 'text' as const, text: (err as Error).message }] };
+        }
+        const result = await runCli(argv, timeoutMs, env);
         const text = result.exitCode === 0
           ? (result.stdout || '(no output)') + (result.stderr ? `\n\n[stderr]\n${result.stderr}` : '')
           : `Exit code ${result.exitCode}\n${result.stderr}${result.stdout ? `\n\n[stdout]\n${result.stdout}` : ''}`;

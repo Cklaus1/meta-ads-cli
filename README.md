@@ -158,7 +158,7 @@ A policy file (`~/.config/meta-ads-cli/policy.json`, or `META_ADS_CLI_POLICY_FIL
 }
 ```
 
-For delegated or agent access, make it owned by root and read-only so the agent can't edit it. `meta-ads policy show` prints the active policy. Every write is logged to `~/.config/meta-ads-cli/journal.jsonl`; `meta-ads journal list` shows it and `meta-ads journal undo <id>` restores the previous values of an update.
+For delegated or agent access, install it as root at `/etc/meta-ads-cli/policy.json`: that file always wins, env vars can't point elsewhere, and a non-root agent can't edit or delete it. A policy in your own home directory only protects against mistakes. `meta-ads policy show` prints the active policy. Every write is logged to `~/.config/meta-ads-cli/journal.jsonl`; `meta-ads journal list` shows it and `meta-ads journal undo <id>` restores the previous values of an update.
 
 For limiting spend risk with delegated or automated (agent) access, see
 **[docs/SPENDING_CAPS.md](docs/SPENDING_CAPS.md)**.

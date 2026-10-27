@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, PolicyError } from '../errors.js';
 import { parseJsonInput } from '../json-input.js';
 
 function getDefaultAccountId(): string {
@@ -39,6 +39,80 @@ export function assertRuleAllowed(evaluationSpec: { filters?: RuleFilter[] }, ex
       + 'Use --action NOTIFICATION to be alerted instead, or pause on a non-cost condition such as frequency or CTR.',
     );
   }
+}
+
+/** Guardrail state the rule checks need, taken from the client and global flags. */
+export interface RuleGuardrails {
+  blockGoingLive: boolean;
+  allowLive: boolean;
+  /** Effective per-write cap in cents (0 = none). */
+  spendCapCents: number;
+  /** Policy account daily-budget ceiling in cents (0 = none). */
+  accountCeilingCents: number;
+  allowBudgetRules: boolean;
+}
+
+const UNPAUSING_TYPES = ['UNPAUSE', 'REBALANCE_BUDGET'];
+const BUDGET_CHANGING_TYPES = ['CHANGE_BUDGET', 'CHANGE_BID', 'REBALANCE_BUDGET'];
+
+/** The change_spec value inside an execution_spec, if any. */
+function changeSpec(execution: Record<string, unknown>): Record<string, unknown> | undefined {
+  const opts = execution.execution_options;
+  if (!Array.isArray(opts)) return undefined;
+  const hit = (opts as Array<Record<string, unknown>>).find(o => o.field === 'change_spec');
+  const value = hit?.value;
+  if (typeof value === 'string') {
+    try { return JSON.parse(value) as Record<string, unknown>; } catch { return undefined; }
+  }
+  return value as Record<string, unknown> | undefined;
+}
+
+/**
+ * Rules run later on Meta's servers, out of reach of the spend cap and the
+ * going-live policy, so check what they will do before creating them.
+ */
+export function assertRuleWithinGuardrails(execution: Record<string, unknown>, g: RuleGuardrails): void {
+  const type = String(execution.execution_type || '').toUpperCase();
+  if (g.blockGoingLive && !g.allowLive && UNPAUSING_TYPES.includes(type)) {
+    throw new PolicyError(
+      `Policy: a ${type} rule can turn ads back on later, which the policy blocks. Pass --allow-live to confirm.`,
+    );
+  }
+  if (!BUDGET_CHANGING_TYPES.includes(type)) return;
+  const limits = [g.spendCapCents, g.accountCeilingCents].filter(n => n > 0);
+  if (limits.length === 0) return;
+  const cap = Math.min(...limits);
+  const spec = changeSpec(execution);
+  // A pure decrease can't push spend past the cap.
+  const amount = Number(spec?.amount);
+  if (type !== 'REBALANCE_BUDGET' && Number.isFinite(amount) && amount < 0) return;
+  if (!g.allowBudgetRules) {
+    throw new PolicyError(
+      `Spend-cap guard: a ${type} rule can raise budgets or bids later on Meta's servers, beyond the ${cap}¢ cap. `
+      + 'Pass --allow-budget-rules and set an absolute "limit" (in cents) within the cap in change_spec.',
+    );
+  }
+  const limit = Number(spec?.limit);
+  if (!spec || spec.limit === undefined || !Number.isFinite(limit) || limit <= 0) {
+    throw new PolicyError(`Spend-cap guard: a ${type} rule needs an absolute change_spec "limit" (cents) so it can't exceed the ${cap}¢ cap.`);
+  }
+  if (limit > cap) {
+    throw new PolicyError(`Spend-cap guard: change_spec limit ${limit}¢ exceeds the spend cap of ${cap}¢.`);
+  }
+}
+
+/** Collect guardrail state for a rules command. `cmd` is the Commander command running. */
+export function ruleGuardrails(client: MetaClient, cmd: Command | undefined, allowBudgetRules: boolean): RuleGuardrails {
+  const policy = client.getPolicy();
+  void cmd;
+  return {
+    blockGoingLive: Boolean(policy.blockGoingLive),
+    // Read from the client, which ignores --allow-live in MCP tool calls the server didn't allow.
+    allowLive: client.isLiveAllowed(),
+    spendCapCents: client.getMaxSpendCapCents(),
+    accountCeilingCents: policy.maxAccountDailyBudgetCents ?? 0,
+    allowBudgetRules,
+  };
 }
 
 function baseFilters(entity: string, timePreset: string, ids: { campaigns?: string[]; adsets?: string[] }): RuleFilter[] {
@@ -146,12 +220,14 @@ export function registerRuleCommands(program: Command, getClient: () => MetaClie
     .requiredOption('--execution-spec <json>', 'execution_spec (JSON, @file or -)')
     .option('--schedule-spec <json>', 'schedule_spec (JSON, @file or -), e.g. {"schedule_type":"SEMI_HOURLY"}')
     .option('--status <status>', 'ENABLED or DISABLED', 'ENABLED')
+    .option('--allow-budget-rules', 'Allow CHANGE_BUDGET/CHANGE_BID rules under a spend cap (needs an absolute change_spec limit within the cap)')
     .option('-o, --output <format>', 'Output format', 'json')
-    .action(handleErrors(async (opts) => {
+    .action(handleErrors(async (opts, cmd: Command) => {
       if (!opts.accountId) throw new Error('Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
       const evaluation = parseJsonInput<Record<string, unknown>>(opts.evaluationSpec, '--evaluation-spec');
       const execution = parseJsonInput<Record<string, unknown>>(opts.executionSpec, '--execution-spec');
       assertRuleAllowed(evaluation as { filters?: RuleFilter[] }, execution as { execution_type?: string });
+      assertRuleWithinGuardrails(execution, ruleGuardrails(getClient(), cmd, Boolean(opts.allowBudgetRules)));
       const body: Record<string, string> = {
         name: opts.name,
         status: String(opts.status).toUpperCase(),
@@ -181,7 +257,7 @@ export function registerRuleCommands(program: Command, getClient: () => MetaClie
     .option('--schedule <type>', 'DAILY, HOURLY or SEMI_HOURLY', 'SEMI_HOURLY')
     .option('--status <status>', 'ENABLED or DISABLED', 'ENABLED')
     .option('-o, --output <format>', 'Output format', 'json')
-    .action(handleErrors(async (preset: string, opts) => {
+    .action(handleErrors(async (preset: string, opts, cmd: Command) => {
       if (!opts.accountId) throw new Error('Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
       const specs = buildPresetRule({
         preset,
@@ -196,6 +272,7 @@ export function registerRuleCommands(program: Command, getClient: () => MetaClie
         minCtr: opts.minCtr !== undefined ? positiveNumber(opts.minCtr, '--min-ctr') : undefined,
         minImpressions: opts.minImpressions !== undefined ? positiveNumber(opts.minImpressions, '--min-impressions') : undefined,
       });
+      assertRuleWithinGuardrails(specs.execution_spec, ruleGuardrails(getClient(), cmd, false));
       const schedule = String(opts.schedule).toUpperCase();
       if (!['DAILY', 'HOURLY', 'SEMI_HOURLY'].includes(schedule)) throw new Error(`--schedule must be DAILY, HOURLY or SEMI_HOURLY, got "${opts.schedule}"`);
       const body: Record<string, string> = {
@@ -217,14 +294,20 @@ export function registerRuleCommands(program: Command, getClient: () => MetaClie
     .option('--execution-spec <json>', 'execution_spec (JSON, @file or -)')
     .option('--schedule-spec <json>', 'schedule_spec (JSON, @file or -)')
     .option('--status <status>', 'ENABLED or DISABLED')
+    .option('--allow-budget-rules', 'Allow CHANGE_BUDGET/CHANGE_BID rules under a spend cap (needs an absolute change_spec limit within the cap)')
     .option('-o, --output <format>', 'Output format', 'json')
-    .action(handleErrors(async (ruleId: string, opts) => {
+    .action(handleErrors(async (ruleId: string, opts, cmd: Command) => {
       const client = getClient();
       const current = (await client.request(ruleId, { params: { fields: RULE_FIELDS } })).data as Record<string, unknown>;
       const evaluation = opts.evaluationSpec ? parseJsonInput<Record<string, unknown>>(opts.evaluationSpec, '--evaluation-spec') : current.evaluation_spec;
       const execution = opts.executionSpec ? parseJsonInput<Record<string, unknown>>(opts.executionSpec, '--execution-spec') : current.execution_spec;
       if (evaluation && execution) {
         assertRuleAllowed(evaluation as { filters?: RuleFilter[] }, execution as { execution_type?: string });
+      }
+      // Enabling (or keeping enabled) a rule lets it act, so check what it will do.
+      const finalStatus = String(opts.status ?? current.status ?? '').toUpperCase();
+      if (execution && finalStatus !== 'DISABLED') {
+        assertRuleWithinGuardrails(execution as Record<string, unknown>, ruleGuardrails(client, cmd, Boolean(opts.allowBudgetRules)));
       }
       const body: Record<string, string> = {};
       const name = opts.name ?? current.name;
@@ -243,10 +326,14 @@ export function registerRuleCommands(program: Command, getClient: () => MetaClie
     rules
       .command(`${cmd} <ruleId>`)
       .description(`Set a rule to ${status}`)
+      .option('--allow-budget-rules', 'Allow enabling a CHANGE_BUDGET/CHANGE_BID rule under a spend cap (needs an absolute limit within the cap)')
       .option('-o, --output <format>', 'Output format', 'json')
-      .action(handleErrors(async (ruleId: string, opts) => {
+      .action(handleErrors(async (ruleId: string, opts, cmd: Command) => {
         const client = getClient();
         const current = (await client.request(ruleId, { params: { fields: RULE_FIELDS } })).data as Record<string, unknown>;
+        if (status === 'ENABLED' && current.execution_spec && typeof current.execution_spec === 'object') {
+          assertRuleWithinGuardrails(current.execution_spec as Record<string, unknown>, ruleGuardrails(client, cmd, Boolean(opts.allowBudgetRules)));
+        }
         const body: Record<string, string> = { status };
         if (current.name) body.name = String(current.name);
         for (const key of ['evaluation_spec', 'execution_spec', 'schedule_spec']) {

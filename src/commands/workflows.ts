@@ -1,7 +1,7 @@
 import { Command } from 'commander';
-import { MetaClient } from '../meta-client.js';
+import { MetaClient, isPlaceholderId, PLACEHOLDER_PREFIX } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { planBudgetSplit } from './ab-testing.js';
+import { planBudgetSplit, copiedId, DEEP_COPY_BODY } from './ab-testing.js';
 import { applyAdsetBudgetSharing, assertCopyableCampaign } from './campaigns.js';
 import { handleErrors } from '../errors.js';
 import { DEFAULT_GOAL_BY_OBJECTIVE, validateBidConfig, BID_STRATEGIES } from './bidding.js';
@@ -98,6 +98,31 @@ function parseCountries(codes: string | undefined): string[] {
 }
 
 /** Error text for a multi-step create that failed partway, naming what already exists. */
+/**
+ * The id of an object a step just created. Throws when the response has none,
+ * so later steps never send `undefined` as a parent id.
+ */
+export function createdId(data: unknown, label: string, client?: MetaClient): string {
+  const id = (data as Record<string, unknown> | undefined)?.id;
+  if ((typeof id !== 'string' || !id) && client?.isPreviewMode()) {
+    // --dry-run responses carry no id; use a placeholder so the preview shows every step.
+    return `${PLACEHOLDER_PREFIX}${label.replace(/\W+/g, '_')}`;
+  }
+  if (typeof id !== 'string' || !id) {
+    throw new Error(`The ${label} create returned no id, so the steps that depend on it were not run.`);
+  }
+  return id;
+}
+
+/**
+ * Under --validate, creates return placeholder ids for objects that don't
+ * exist, so children can't be validated against them: skip those steps.
+ * (Under --plan the placeholder is passed on and the write is recorded.)
+ */
+export function skipValidatedChild(client: MetaClient, parentId: string): boolean {
+  return client.isValidateMode() && isPlaceholderId(parentId);
+}
+
 export function launchFailureMessage(err: unknown, created: Record<string, string>): string {
   const message = (err as Error).message || String(err);
   const ids = Object.entries(created).map(([k, v]) => `${k}=${v}`).join(', ');
@@ -303,16 +328,24 @@ export function registerWorkflowCommands(program: Command, getClient: () => Meta
       try {
         // Create campaign
         const campResponse = await client.request(`${opts.accountId}/campaigns`, { method: 'POST', body: campaignBody });
-        const campaignId = (campResponse.data as Record<string, unknown>).id as string;
-        if (campaignId) created.campaign_id = campaignId;
+        const campaignId = createdId(campResponse.data, 'campaign', client);
+        created.campaign_id = campaignId;
+        if (skipValidatedChild(client, campaignId)) {
+          console.log(formatOutput({
+            campaign: campResponse.data,
+            adset: { skipped: true, reason: 'Needs a real campaign; the campaign was only validated.' },
+            ad: { skipped: true, reason: 'Needs a real ad set.' },
+          }, opts.output as OutputFormat));
+          return;
+        }
 
         // Create ad set
         const adsetResponse = await client.request(`${opts.accountId}/adsets`, {
           method: 'POST',
           body: { ...adsetBody, campaign_id: campaignId },
         });
-        const adsetId = (adsetResponse.data as Record<string, unknown>).id as string;
-        if (adsetId) created.adset_id = adsetId;
+        const adsetId = createdId(adsetResponse.data, 'ad set', client);
+        created.adset_id = adsetId;
 
         // Create ad
         const adResponse = await client.request(`${opts.accountId}/ads`, {
@@ -358,12 +391,12 @@ export function registerWorkflowCommands(program: Command, getClient: () => Meta
 
       // Duplicate campaign twice
       const [controlCopy, variantCopy] = await Promise.all([
-        client.request(`${campaignId}/copies`, { method: 'POST', body: { status_option: 'PAUSED' } }),
-        client.request(`${campaignId}/copies`, { method: 'POST', body: { status_option: 'PAUSED' } }),
+        client.request(`${campaignId}/copies`, { method: 'POST', body: { ...DEEP_COPY_BODY } }),
+        client.request(`${campaignId}/copies`, { method: 'POST', body: { ...DEEP_COPY_BODY } }),
       ]);
 
-      const controlId = (controlCopy.data as Record<string, unknown>).copied_campaign_id as string;
-      const variantId = (variantCopy.data as Record<string, unknown>).copied_campaign_id as string;
+      const controlId = copiedId(controlCopy.data);
+      const variantId = copiedId(variantCopy.data);
 
       // Rename and update variant
       if (controlId) {

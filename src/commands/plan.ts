@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
-import { MetaClient } from '../meta-client.js';
+import { MetaClient, isPlaceholderId, PLACEHOLDER_PREFIX } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 import { applyAdsetBudgetSharing, specialCategoryTargetingIssues } from './campaigns.js';
@@ -249,6 +249,29 @@ function sortKeys(v: unknown): unknown {
   return v;
 }
 
+/**
+ * True when every key the spec sets in `desired` has the same value in
+ * `live`. Meta adds its own keys to targeting (e.g. location_types,
+ * targeting_automation), so live may be a superset. Arrays must match.
+ */
+export function isSubsetOf(desired: unknown, live: unknown): boolean {
+  if (Array.isArray(desired)) {
+    if (!Array.isArray(live) || desired.length !== live.length) return false;
+    return desired.every((d, i) => isSubsetOf(d, live[i]));
+  }
+  if (desired && typeof desired === 'object') {
+    if (!live || typeof live !== 'object' || Array.isArray(live)) return false;
+    return Object.entries(desired as Record<string, unknown>)
+      .every(([k, v]) => isSubsetOf(v, (live as Record<string, unknown>)[k]));
+  }
+  // Meta returns numbers as strings in some places (and vice versa).
+  return String(desired) === String(live);
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  return typeof value === 'string' ? JSON.parse(value) : value;
+}
+
 /** Fields in `desired` that differ from `live`, ignoring fields the spec doesn't set. */
 export function diffFields(desired: Record<string, string>, live: Record<string, unknown>, fields: string[]): Record<string, { from: unknown; to: unknown }> {
   const changes: Record<string, { from: unknown; to: unknown }> = {};
@@ -256,6 +279,16 @@ export function diffFields(desired: Record<string, string>, live: Record<string,
     if (desired[f] === undefined) continue;
     // Never pause a live object just because the spec says PAUSED by default.
     if (f === 'status' && desired[f] === 'PAUSED') continue;
+    if ((f === 'targeting' || f === 'bid_constraints') && live[f] !== undefined && live[f] !== null) {
+      try {
+        if (!isSubsetOf(sortKeys(parseMaybeJson(desired[f])), sortKeys(parseMaybeJson(live[f])))) {
+          changes[f] = { from: live[f], to: desired[f] };
+        }
+        continue;
+      } catch {
+        // fall through to the plain comparison
+      }
+    }
     let a: string | undefined;
     let b: string | undefined;
     try {
@@ -326,14 +359,16 @@ async function uploadImage(client: MetaClient, account: string, file: string): P
   const res = await client.request(`${account}/adimages`, { method: 'POST', body: { bytes, name: path.basename(file) } });
   const images = (res.data as { images?: Record<string, { hash?: string }> }).images;
   const hash = images ? Object.values(images)[0]?.hash : undefined;
-  if (!hash && !client.isDryRun()) throw new Error(`Image upload for ${file} returned no hash.`);
-  return hash || '<image-hash>';
+  if (hash) return hash;
+  if (client.isPreviewMode()) return `${PLACEHOLDER_PREFIX}image_hash`;
+  throw new Error(`Image upload for ${file} returned no hash.`);
 }
 
 async function uploadVideo(client: MetaClient, account: string, file: string): Promise<string> {
   const res = await client.uploadFile(`${account}/advideos`, file);
   const id = (res.data as { id?: string }).id;
-  if (client.isDryRun()) return '<video-id>';
+  // Nothing was uploaded in preview modes, so there is nothing to poll.
+  if (client.isPreviewMode() || isPlaceholderId(id)) return id || `${PLACEHOLDER_PREFIX}video_id`;
   if (!id) throw new Error(`Video upload for ${file} returned no id.`);
   const deadline = Date.now() + 600_000;
   for (;;) {
@@ -381,6 +416,25 @@ export async function creativeBody(client: MetaClient, account: string, cr: Crea
 function idOf(data: unknown): string | undefined {
   return (data as { id?: string })?.id;
 }
+
+/**
+ * Id of an object apply just created. In preview modes a placeholder stands
+ * in (dry-run responses have none); otherwise a missing id is an error, so a
+ * child is never sent with a made-up parent id.
+ */
+export function stepId(client: MetaClient, data: unknown, label: string): string {
+  const id = idOf(data);
+  if (id) return id;
+  if (client.isPreviewMode()) return `${PLACEHOLDER_PREFIX}${label.replace(/\W+/g, '_')}`;
+  throw new Error(`Creating the ${label} returned no id.`);
+}
+
+/** Under --validate, children of objects that were only validated can't be checked. */
+function skippedChild(client: MetaClient, parentId: string | undefined): boolean {
+  return client.isValidateMode() && (!parentId || isPlaceholderId(parentId));
+}
+
+const VALIDATE_SKIP = 'Not validated: it depends on an object that was only validated, not created.';
 
 export function registerPlanCommands(program: Command, getClient: () => MetaClient): void {
   program
@@ -431,7 +485,7 @@ export function registerPlanCommands(program: Command, getClient: () => MetaClie
           if (step.type === 'campaign') {
             if (step.action === 'create') {
               const res = await client.request(`${account}/campaigns`, { method: 'POST', body: step.body! });
-              const id = idOf(res.data) || '<campaign-id>';
+              const id = stepId(client, res.data, `campaign_${step.name}`);
               ids.set(`campaign:${step.name}`, id);
               created[`campaign "${step.name}"`] = id;
               results.push({ ...step, id, result: res.data });
@@ -443,9 +497,14 @@ export function registerPlanCommands(program: Command, getClient: () => MetaClie
             }
           } else if (step.type === 'adset') {
             if (step.action === 'create') {
-              const campaignId = ids.get(`campaign:${step.parent}`)!;
+              const campaignId = ids.get(`campaign:${step.parent}`);
+              if (skippedChild(client, campaignId)) {
+                results.push({ ...step, skipped: true, reason: VALIDATE_SKIP });
+                continue;
+              }
+              if (!campaignId) throw new Error(`No campaign id for ad set "${step.name}".`);
               const res = await client.request(`${account}/adsets`, { method: 'POST', body: { ...step.body!, campaign_id: campaignId } });
-              const id = idOf(res.data) || `<adset-id:${step.name}>`;
+              const id = stepId(client, res.data, `adset_${step.name}`);
               ids.set(`adset:${step.name}`, id);
               created[`ad set "${step.name}"`] = id;
               results.push({ ...step, id, result: res.data });
@@ -458,23 +517,34 @@ export function registerPlanCommands(program: Command, getClient: () => MetaClie
           } else if (step.action === 'create') {
             const adset = (spec.adsets || []).find(a => a.name === step.parent)!;
             const ad = (adset.ads || []).find(x => x.name === step.name)!;
+            const adsetId = ids.get(`adset:${step.parent}`);
             let creativeId = ad.creative_id;
             if (!creativeId) {
               const body = await creativeBody(client, account, ad.creative!, ad.name);
+              if (client.isValidateMode() && body.object_story_spec.includes(PLACEHOLDER_PREFIX)) {
+                // The media upload was only validated, so the creative can't be checked.
+                results.push({ ...step, skipped: true, reason: 'Not validated: its image or video was not uploaded.' });
+                continue;
+              }
               const res = await client.request(`${account}/adcreatives`, { method: 'POST', body });
-              creativeId = idOf(res.data) || '<creative-id>';
+              creativeId = stepId(client, res.data, `creative_${ad.name}`);
               created[`creative for "${ad.name}"`] = creativeId;
             }
+            if (skippedChild(client, adsetId) || (client.isValidateMode() && isPlaceholderId(creativeId))) {
+              results.push({ ...step, creative_id: creativeId, skipped: true, reason: VALIDATE_SKIP });
+              continue;
+            }
+            if (!adsetId) throw new Error(`No ad set id for ad "${ad.name}".`);
             const res = await client.request(`${account}/ads`, {
               method: 'POST',
               body: {
                 name: ad.name,
-                adset_id: ids.get(`adset:${step.parent}`)!,
+                adset_id: adsetId,
                 creative: JSON.stringify({ creative_id: creativeId }),
                 status: activate && ad.status === 'ACTIVE' ? 'ACTIVE' : 'PAUSED',
               },
             });
-            const id = idOf(res.data) || '<ad-id>';
+            const id = stepId(client, res.data, `ad_${ad.name}`);
             created[`ad "${ad.name}"`] = id;
             results.push({ ...step, id, creative_id: creativeId, result: res.data });
           } else {

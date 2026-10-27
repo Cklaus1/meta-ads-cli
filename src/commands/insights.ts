@@ -1,7 +1,7 @@
 import { Command } from 'commander';
-import { MetaClient } from '../meta-client.js';
+import { MetaClient, isPlaceholderId } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, UsageError } from '../errors.js';
 import { insightsTimeParams } from '../time-range.js';
 import { parseJsonInput } from '../json-input.js';
 import { deriveMetrics, resultEventFor, actionValue } from '../metrics.js';
@@ -290,11 +290,18 @@ export function parseAttributionWindows(value: string): string {
   return JSON.stringify(list);
 }
 
-/** Start an async insights job; returns its report_run_id (undefined in dry-run). */
+/**
+ * Start an async insights job; returns its report_run_id (undefined in
+ * dry-run). The POST only reads, so it is sent as readLike: it works under
+ * --read-only and isn't planned, validated or journaled as a write.
+ */
 export async function startAsyncReport(client: MetaClient, objectId: string, body: Record<string, string>): Promise<string | undefined> {
-  const started = await client.request(`${objectId}/insights`, { method: 'POST', body });
-  const id = (started.data as { report_run_id?: string }).report_run_id;
-  if (!id && !(started.data as { dryRun?: boolean }).dryRun) {
+  const started = await client.request(`${objectId}/insights`, { method: 'POST', body, readLike: true });
+  const data = started.data as { report_run_id?: string; dryRun?: boolean; planned?: boolean; id?: string };
+  const id = data.report_run_id;
+  // A placeholder (no real report was started) has nothing to poll.
+  if (isPlaceholderId(id) || isPlaceholderId(data.id)) return undefined;
+  if (!id && !data.dryRun) {
     throw new Error(`Meta did not return a report_run_id: ${JSON.stringify(started.data)}`);
   }
   return id;
@@ -346,12 +353,35 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * Validate --poll-interval / --timeout (seconds) for async reports: finite,
+ * a poll interval of at least 1s, and a positive timeout. Returns milliseconds.
+ */
+export function parsePollOptions(pollInterval: string, timeout: string): { pollMs: number; timeoutMs: number } {
+  const pollSec = Number(pollInterval);
+  const timeoutSec = Number(timeout);
+  if (pollInterval === '' || !Number.isFinite(pollSec) || pollSec < 1) {
+    throw new UsageError(`--poll-interval must be a number of seconds, at least 1, got: "${pollInterval}"`);
+  }
+  if (timeout === '' || !Number.isFinite(timeoutSec) || timeoutSec <= 0) {
+    throw new UsageError(`--timeout must be a positive number of seconds, got: "${timeout}"`);
+  }
+  return { pollMs: pollSec * 1000, timeoutMs: timeoutSec * 1000 };
+}
+
 /** Poll an async insights report until it finishes. Returns the final status object. */
 export async function waitForReport(
   client: MetaClient,
   reportRunId: string,
   opts: { pollMs: number; timeoutMs: number; onProgress?: (pct: number, status: string) => void },
 ): Promise<Record<string, unknown>> {
+  // Guard here too, so a NaN can never turn this into a busy-poll.
+  if (!Number.isFinite(opts.pollMs) || opts.pollMs < 0 || !Number.isFinite(opts.timeoutMs) || opts.timeoutMs < 0) {
+    throw new UsageError('Async report poll interval and timeout must be non-negative numbers');
+  }
+  if (isPlaceholderId(reportRunId)) return { id: reportRunId, async_status: 'Job Completed', placeholder: true };
+  // Never poll faster than once a second while waiting.
+  const pollMs = opts.timeoutMs > 0 ? Math.max(opts.pollMs, 1000) : opts.pollMs;
   const deadline = Date.now() + opts.timeoutMs;
   for (;;) {
     const res = await client.request(reportRunId, {
@@ -370,7 +400,7 @@ export async function waitForReport(
       throw new Error(`Async insights report ${reportRunId} still running after ${Math.round(opts.timeoutMs / 1000)}s. `
         + `Check later with: meta-ads insights async-result ${reportRunId}`);
     }
-    await sleep(opts.pollMs);
+    await sleep(pollMs);
   }
 }
 
@@ -462,11 +492,8 @@ export function registerInsightCommands(program: Command, getClient: () => MetaC
     .option('--page-limit <n>', 'Max pages when using --all')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (objectId: string, opts) => {
+      const { pollMs, timeoutMs } = parsePollOptions(opts.pollInterval, opts.timeout);
       const client = getClient();
-      const pollSec = Number(opts.pollInterval);
-      const timeoutSec = Number(opts.timeout);
-      if (!Number.isFinite(pollSec) || pollSec < 0) throw new Error('--poll-interval must be a non-negative number of seconds');
-      if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) throw new Error('--timeout must be a positive number of seconds');
 
       const body = buildInsightParams(objectId, opts);
 
@@ -478,8 +505,8 @@ export function registerInsightCommands(program: Command, getClient: () => MetaC
       }
 
       await waitForReport(client, reportRunId, {
-        pollMs: pollSec * 1000,
-        timeoutMs: timeoutSec * 1000,
+        pollMs,
+        timeoutMs,
         onProgress: (pct, status) => console.error(`Report ${reportRunId}: ${status} (${pct}%)`),
       });
       const endpoint = `${reportRunId}/insights`;
@@ -532,6 +559,7 @@ export function registerInsightCommands(program: Command, getClient: () => MetaC
       if (opts.by !== 'country' && opts.by !== 'publisher_platform') {
         throw new Error(`--by must be country or publisher_platform, got: "${opts.by}"`);
       }
+      const { pollMs, timeoutMs } = parsePollOptions(opts.pollInterval, opts.timeout);
       const client = getClient();
       const account = await client.request(opts.accountId, { params: { fields: 'currency,timezone_name' } });
       const acct = account.data as Record<string, string>;
@@ -546,8 +574,8 @@ export function registerInsightCommands(program: Command, getClient: () => MetaC
       const reportRunId = await startAsyncReport(client, opts.accountId, body);
       if (!reportRunId) return;
       await waitForReport(client, reportRunId, {
-        pollMs: Number(opts.pollInterval) * 1000,
-        timeoutMs: Number(opts.timeout) * 1000,
+        pollMs,
+        timeoutMs,
         onProgress: (pct, status) => console.error(`Report ${reportRunId}: ${status} (${pct}%)`),
       });
       // No page cap: MMM needs the full history.

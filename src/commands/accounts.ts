@@ -1,9 +1,9 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, PolicyError } from '../errors.js';
 import { resolveProfile } from '../profiles.js';
-import { deriveMetrics, PERFORMANCE_FIELDS } from '../metrics.js';
+import { deriveMetrics, PERFORMANCE_FIELDS, minorUnitFactor } from '../metrics.js';
 import { insightsTimeParams } from '../time-range.js';
 
 function getDefaultAccountId(): string {
@@ -75,10 +75,32 @@ export function assessAccountHealth(
   return issues;
 }
 
-/** Days in the month of a date, and how many have fully elapsed. */
-function monthProgress(now: Date): { daysInMonth: number; daysElapsed: number } {
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-  return { daysInMonth, daysElapsed: Math.max(1, now.getDate() - 1) };
+/**
+ * Days in the current month and days elapsed (including the elapsed part of
+ * today) in the account's timezone. Month-to-date spend from Meta includes
+ * today's partial spend, so the elapsed count must include it too.
+ */
+export function monthProgress(now: Date, timeZone?: string): { daysInMonth: number; daysElapsed: number } {
+  let parts: Record<string, number>;
+  try {
+    parts = Object.fromEntries(
+      new Intl.DateTimeFormat('en-US', {
+        timeZone: timeZone || undefined, year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', hourCycle: 'h23',
+      }).formatToParts(now).filter(p => p.type !== 'literal').map(p => [p.type, Number(p.value)]),
+    );
+  } catch {
+    // Unknown timezone name: fall back to the local clock.
+    parts = { year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate(), hour: now.getHours(), minute: now.getMinutes() };
+  }
+  const daysInMonth = new Date(Date.UTC(parts.year, parts.month, 0)).getUTCDate();
+  const todayFraction = (parts.hour * 60 + parts.minute) / 1440;
+  // At least an hour's worth, so a projection right after midnight isn't wild.
+  return { daysInMonth, daysElapsed: Math.max(1 / 24, parts.day - 1 + todayFraction) };
+}
+
+/** Meta's spend_cap write takes standard currency units (23.50 for $23.50), unlike the read field. */
+export function spendCapWriteValue(cents: number, currency?: string): string {
+  return String(cents / minorUnitFactor(currency));
 }
 
 export function registerAccountCommands(program: Command, getClient: () => MetaClient): void {
@@ -206,24 +228,35 @@ export function registerAccountCommands(program: Command, getClient: () => MetaC
   accounts
     .command('set-spend-cap <accountId>')
     .description('Set, reset or remove the account-level spend cap (Meta pauses all delivery once amount spent reaches it)')
-    .option('--cents <amount>', 'New cap in the account currency\'s minor units (cents for USD)')
+    .option('--cents <amount>', 'New cap in the account currency\'s minor units (cents for USD); sent to Meta in standard units')
     .option('--reset', 'Reset amount spent against the cap back to 0')
     .option('--remove', 'Remove the spend cap')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (accountId: string, opts) => {
       const chosen = [opts.cents !== undefined, !!opts.reset, !!opts.remove].filter(Boolean).length;
       if (chosen !== 1) throw new Error('Give exactly one of --cents <amount>, --reset or --remove');
+      const client = getClient();
+      const id = actId(accountId);
       const body: Record<string, string> = {};
       if (opts.cents !== undefined) {
         if (!/^\d+$/.test(String(opts.cents)) || Number(opts.cents) <= 0) {
           throw new Error(`--cents must be a positive whole number, got: "${opts.cents}"`);
         }
-        // Sent in minor units like the read field; the CLI's spend-cap guard checks it too.
-        body.spend_cap = String(opts.cents);
+        const cents = Number(opts.cents);
+        // The write value is in standard units, which the client's per-field
+        // guard would read as cents, so check the cap here in cents.
+        const cap = client.getMaxSpendCapCents();
+        if (cap > 0 && cents > cap) {
+          throw new PolicyError(`Spend-cap guard: spend_cap=${cents}¢ exceeds the spend cap of ${cap}¢.`);
+        }
+        // Per the AdAccount update reference, spend_cap is written in the
+        // currency's standard denomination (e.g. 23.50 for USD $23.50).
+        const account = (await client.request(id, { params: { fields: 'currency' } })).data as Record<string, unknown>;
+        body.spend_cap = spendCapWriteValue(cents, typeof account.currency === 'string' ? account.currency : undefined);
       } else {
         body.spend_cap_action = opts.reset ? 'reset' : 'delete';
       }
-      const response = await getClient().request(actId(accountId), { method: 'POST', body });
+      const response = await client.request(id, { method: 'POST', body });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -242,7 +275,8 @@ export function registerAccountCommands(program: Command, getClient: () => MetaC
       ]);
       const spendOf = (r: { data: unknown }) => Number((((r.data as { data?: Array<{ spend?: string }> }).data) || [])[0]?.spend ?? 0);
       const monthSpend = spendOf(mtd);
-      const { daysInMonth, daysElapsed } = monthProgress(new Date());
+      const { daysInMonth, daysElapsed } = monthProgress(new Date(), typeof account.timezone_name === 'string' ? account.timezone_name : undefined);
+      const factor = minorUnitFactor(typeof account.currency === 'string' ? account.currency : undefined);
       const dailyAvg = monthSpend / daysElapsed;
       const cap = Number(account.spend_cap);
       const spent = Number(account.amount_spent);
@@ -259,8 +293,8 @@ export function registerAccountCommands(program: Command, getClient: () => MetaC
         amount_spent_minor_units: spent,
         cap_remaining_minor_units: capRemaining,
         // amount_spent/spend_cap are in minor units; insights spend is in major units.
-        days_until_cap_at_current_pace: capRemaining !== null && dailyAvg > 0 ? Number((capRemaining / 100 / dailyAvg).toFixed(1)) : null,
-        note: 'Insights spend is in currency units; spend_cap and amount_spent are in minor units (cents for USD). Days-until-cap assumes a 2-decimal currency.',
+        days_until_cap_at_current_pace: capRemaining !== null && dailyAvg > 0 ? Number((capRemaining / factor / dailyAvg).toFixed(1)) : null,
+        note: 'Insights spend is in currency units; spend_cap and amount_spent are in the currency\'s minor units (cents for USD). Pacing uses the account timezone and includes today\'s partial spend.',
       }, opts.output as OutputFormat));
     }));
 

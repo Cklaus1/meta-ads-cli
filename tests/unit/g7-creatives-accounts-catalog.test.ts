@@ -115,12 +115,13 @@ describe('accounts', () => {
     expect(assessAccountHealth({ account_status: 1 })[0].issue).toContain('No payment method');
   });
 
-  it('set-spend-cap validates and sends minor units', async () => {
-    const { client, request } = mockClient(async () => ({ data: { success: true }, status: 200 }));
+  it('set-spend-cap validates and sends standard currency units (B2-07)', async () => {
+    const { client, request } = mockClient(async (_e, o) => ({ data: o?.method === 'POST' ? { success: true } : { currency: 'USD' }, status: 200 }));
     await run(registerAccountCommands, client, ['accounts', 'set-spend-cap', '123', '--cents', '500000']);
-    expect(request.mock.calls[0]).toEqual(['act_123', { method: 'POST', body: { spend_cap: '500000' } }]);
+    const posts = () => request.mock.calls.filter(c => c[1]?.method === 'POST');
+    expect(posts()[0]).toEqual(['act_123', { method: 'POST', body: { spend_cap: '5000' } }]);
     await run(registerAccountCommands, client, ['accounts', 'set-spend-cap', 'act_123', '--remove']);
-    expect(request.mock.calls[1][1]!.body).toEqual({ spend_cap_action: 'delete' });
+    expect(posts()[1][1]!.body).toEqual({ spend_cap_action: 'delete' });
     await expect(run(registerAccountCommands, client, ['accounts', 'set-spend-cap', '123', '--cents', '50.5'])).rejects.toThrow('whole number');
     await expect(run(registerAccountCommands, client, ['accounts', 'set-spend-cap', '123'])).rejects.toThrow('exactly one');
   });

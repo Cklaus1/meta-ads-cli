@@ -126,7 +126,7 @@ describe('monitor watch', () => {
   it('prints one JSON line per run', async () => {
     const { client: c } = mockClient(async (endpoint) => {
       if (endpoint === 'act_1/adsets') return { data: { data: [{ id: '1', name: 'a' }] }, status: 200 };
-      return { data: { data: [{ adset_id: '1', spend: '100', impressions: '5000', action_values: [] }] }, status: 200 };
+      return { data: { data: [{ adset_id: '1', objective: 'OUTCOME_SALES', spend: '100', impressions: '5000', action_values: [] }] }, status: 200 };
     });
     const { stdout } = await run(registerMonitoringCommands, c, ['monitor', 'watch', '--account-id', 'act_1', '--interval', '1m', '--min-roas', '1', '--max-runs', '1']);
     const tick = JSON.parse(stdout.trim());

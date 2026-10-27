@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, CliError } from '../errors.js';
 import { actionValue, deriveMetrics, resultEventFor, PERFORMANCE_FIELDS, type DerivedMetrics } from '../metrics.js';
 import { META_DATE_PRESETS, runInsights, TIME_RANGE_HELP } from './insights.js';
 
@@ -57,13 +57,33 @@ export interface PauseThresholds {
 /** Volume floors below which a cost/ROAS judgement is noise. */
 export const DEFAULT_FLOORS = { minImpressions: '1000', minResults: '3' };
 
+/** Whether a row has any purchase signal (revenue, purchase_roas or purchases). */
+function hasPurchaseSignal(insight: Row): boolean {
+  const roasList = insight.purchase_roas;
+  return actionValue(insight.action_values, 'purchase') > 0
+    || actionValue(insight.actions, 'purchase') > 0
+    || (Array.isArray(roasList) && roasList.length > 0);
+}
+
 /**
- * Reasons an entity's insights breach the thresholds (empty = keep running).
- * Cost and ROAS rules only fire once the row clears the volume floors, and
- * a CPA rule with no results fires only after spending 2× the target CPA.
+ * ROAS is judged only where it means something: the result event is a
+ * purchase, or the row has purchase signals. Lead or traffic rows without
+ * purchases have no ROAS rather than a ROAS of 0.
  */
-export function pauseReasons(insight: Row, opts: PauseThresholds): string[] {
-  const reasons: string[] = [];
+export function roasApplies(insight: Row, resultEvent: string): boolean {
+  return resultEvent === 'purchase' || hasPurchaseSignal(insight);
+}
+
+export interface PauseFinding { rule: 'HIGH_SPEND' | 'HIGH_CPC' | 'HIGH_CPA' | 'NO_RESULTS' | 'LOW_ROAS'; message: string }
+
+/**
+ * Rules an entity's insights breach (empty = keep running). Cost and ROAS
+ * rules only fire once the row clears the volume floors, and a CPA rule
+ * with no results fires only after spending 2× the target CPA.
+ */
+export function pauseFindings(insight: Row, opts: PauseThresholds): PauseFinding[] {
+  const findings: PauseFinding[] = [];
+  const reasons = { push: (rule: PauseFinding['rule'], message: string) => findings.push({ rule, message }) };
   const m: DerivedMetrics = deriveMetrics(insight, eventFor(insight, opts.resultEvent));
   const minSpend = opts.minSpend ? parseThreshold(opts.minSpend, '--min-spend') : 0;
   const minImpressions = parseThreshold(opts.minImpressions ?? DEFAULT_FLOORS.minImpressions, '--min-impressions');
@@ -72,29 +92,34 @@ export function pauseReasons(insight: Row, opts: PauseThresholds): string[] {
 
   if (opts.maxSpend) {
     const max = parseThreshold(opts.maxSpend, '--max-spend');
-    if (m.spend > max) reasons.push(`Spend ${m.spend} > ${max}`);
+    if (m.spend > max) reasons.push('HIGH_SPEND', `Spend ${m.spend} > ${max}`);
   }
   if (opts.maxCpc) {
     const max = parseThreshold(opts.maxCpc, '--max-cpc');
-    if (enoughDelivery && m.cpc !== null && m.cpc > max) reasons.push(`Link CPC ${m.cpc.toFixed(2)} > ${max}`);
+    if (enoughDelivery && m.cpc !== null && m.cpc > max) reasons.push('HIGH_CPC', `Link CPC ${m.cpc.toFixed(2)} > ${max}`);
   }
   if (opts.maxCpa) {
     const max = parseThreshold(opts.maxCpa, '--max-cpa');
     if (m.results >= minResults && m.cost_per_result !== null && m.cost_per_result > max) {
-      reasons.push(`Cost per ${m.result_event} ${m.cost_per_result.toFixed(2)} > ${max} (${m.results} results)`);
+      reasons.push('HIGH_CPA', `Cost per ${m.result_event} ${m.cost_per_result.toFixed(2)} > ${max} (${m.results} results)`);
     } else if (m.results === 0 && m.spend >= 2 * max && max > 0) {
-      reasons.push(`No ${m.result_event} results after spending ${m.spend} (≥ 2× target CPA ${max})`);
+      reasons.push('NO_RESULTS', `No ${m.result_event} results after spending ${m.spend} (≥ 2× target CPA ${max})`);
     }
   }
   if (opts.minRoas) {
     const min = parseThreshold(opts.minRoas, '--min-roas');
-    // ROAS is only judged with enough delivery; no spend means no signal.
-    if (enoughDelivery && m.spend > 0) {
+    // ROAS is only judged with enough delivery and where it applies.
+    if (enoughDelivery && m.spend > 0 && roasApplies(insight, m.result_event)) {
       const roas = getRoas(insight) ?? 0;
-      if (roas < min) reasons.push(`ROAS ${roas} < ${min}`);
+      if (roas < min) reasons.push('LOW_ROAS', `ROAS ${roas} < ${min}`);
     }
   }
-  return reasons;
+  return findings;
+}
+
+/** Human-readable reasons an entity breaches the thresholds (empty = keep running). */
+export function pauseReasons(insight: Row, opts: PauseThresholds): string[] {
+  return pauseFindings(insight, opts).map(f => f.message);
 }
 
 /** Learning status for an entity row from the ad set (or the ad's ad set). */
@@ -153,7 +178,7 @@ interface EvaluateOpts extends PauseThresholds {
 
 export interface Evaluation {
   entities_checked: number;
-  to_pause: Array<{ id: string; name: string; reason: string }>;
+  to_pause: Array<{ id: string; name: string; reason: string; rules: string[] }>;
   skipped_learning: string[];
 }
 
@@ -193,8 +218,10 @@ export async function evaluateEntities(client: MetaClient, opts: EvaluateOpts): 
       skipped.push(id);
       continue;
     }
-    const reasons = pauseReasons(byId.get(id) || {}, opts);
-    if (reasons.length > 0) toPause.push({ id, name: String(entity.name), reason: reasons.join('; ') });
+    const findings = pauseFindings(byId.get(id) || {}, opts);
+    if (findings.length > 0) {
+      toPause.push({ id, name: String(entity.name), reason: findings.map(f => f.message).join('; '), rules: findings.map(f => f.rule) });
+    }
   }
   return { entities_checked: entities.length, to_pause: toPause, skipped_learning: skipped };
 }
@@ -222,9 +249,22 @@ export function parseInterval(value: string): number {
   return ms;
 }
 
-/** Alerts not present in the previous tick, so a watch doesn't repeat the same notification. */
+/**
+ * Stable keys for an alert: entity id plus rule type, not the message text
+ * (which embeds live numbers that change every tick).
+ */
+export function alertKeys(alert: { id: string; reason: string; rules?: string[] }): string[] {
+  return (alert.rules && alert.rules.length ? alert.rules : [alert.reason]).map(rule => `${alert.id}|${rule}`);
+}
+
+/** Alerts with a rule not present in the previous tick, so a watch doesn't repeat the same notification. */
 export function newAlerts(prev: Set<string>, current: Evaluation['to_pause']): Evaluation['to_pause'] {
-  return current.filter(a => !prev.has(`${a.id}|${a.reason}`));
+  return current.filter(a => alertKeys(a).some(key => !prev.has(key)));
+}
+
+/** Errors that won't fix themselves between ticks, so a watch should stop. */
+export function isFatalWatchError(err: unknown): boolean {
+  return err instanceof CliError && ['auth', 'permission', 'usage', 'policy'].includes(err.type);
 }
 
 function addThresholdOptions(cmd: Command): Command {
@@ -279,7 +319,7 @@ export function registerMonitoringCommands(program: Command, getClient: () => Me
         }
       };
       check(opts.maxCpa, '--max-cpa', m.results > 0 ? m.cost_per_result : null, true, 'HIGH_CPA', 'warning', `Cost per ${m.result_event}`);
-      check(opts.minRoas, '--min-roas', m.spend > 0 ? (getRoas(data) ?? 0) : null, false, 'LOW_ROAS', 'warning', 'ROAS');
+      check(opts.minRoas, '--min-roas', m.spend > 0 && roasApplies(data, m.result_event) ? (getRoas(data) ?? 0) : null, false, 'LOW_ROAS', 'warning', 'ROAS');
       check(opts.maxCpc, '--max-cpc', m.cpc, true, 'HIGH_CPC', 'warning', 'Link CPC');
       check(opts.minCtr, '--min-ctr', data.inline_link_click_ctr !== undefined ? Number(data.inline_link_click_ctr) : m.ctr, false, 'LOW_CTR', 'warning', 'Link CTR');
       check(opts.maxFrequency, '--max-frequency', Number(data.frequency ?? m.frequency ?? 0), true, 'HIGH_FREQUENCY', 'warning', 'Frequency');
@@ -381,8 +421,10 @@ export function registerMonitoringCommands(program: Command, getClient: () => Me
         try {
           const evaluation = await evaluateEntities(client, opts);
           const fresh = newAlerts(seen, evaluation.to_pause);
-          seen = new Set(evaluation.to_pause.map(a => `${a.id}|${a.reason}`));
-          const { paused, failed } = opts.autoPause ? await pauseAll(client, fresh) : { paused: [], failed: [] };
+          seen = new Set(evaluation.to_pause.flatMap(alertKeys));
+          // Only ACTIVE entities are evaluated, so everything still in to_pause
+          // is still running: pause all of it, retrying earlier failures.
+          const { paused, failed } = opts.autoPause ? await pauseAll(client, evaluation.to_pause) : { paused: [], failed: [] };
           const tick = { time: new Date().toISOString(), run, ...evaluation, new_alerts: fresh, paused, failed };
           console.log(JSON.stringify(tick));
           if (opts.notify && fresh.length > 0) {
@@ -393,6 +435,8 @@ export function registerMonitoringCommands(program: Command, getClient: () => Me
             });
           }
         } catch (err) {
+          // Auth, permission, usage and policy errors won't clear by waiting.
+          if (isFatalWatchError(err)) throw err;
           // Keep watching through transient API errors.
           console.log(JSON.stringify({ time: new Date().toISOString(), run, error: (err as Error).message }));
         }

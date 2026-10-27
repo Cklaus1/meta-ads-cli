@@ -6,6 +6,7 @@ import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 import { LEAD_FIELDS, pivotLeads } from './leads.js';
+import { parseCsv } from './audiences.js';
 
 /** Check Meta's X-Hub-Signature-256 header (HMAC-SHA256 of the raw body with the app secret). */
 export function verifySignature(rawBody: Buffer, header: string | undefined, appSecret: string): boolean {
@@ -29,21 +30,41 @@ export function extractLeadgenEvents(payload: unknown): Array<{ leadgenId: strin
   return out;
 }
 
-/** Append one lead row to a CSV, writing the header first if the file is new. */
-export function appendLeadCsv(file: string, lead: Record<string, unknown>): void {
+/** Lead IDs already in a leads CSV (its "id" column), so redelivered leads aren't appended twice. */
+export function leadIdsInCsv(file: string): Set<string> {
+  if (!fs.existsSync(file)) return new Set();
+  const rows = parseCsv(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  const header = rows.shift() ?? [];
+  const col = header.indexOf('id');
+  return new Set(col === -1 ? [] : rows.map(r => r[col]).filter(Boolean));
+}
+
+/**
+ * Append one lead row to a CSV, writing the header first if the file is new.
+ * Returns false (and appends nothing) when the lead's ID is already in `seen`,
+ * since Meta retries webhook deliveries.
+ */
+export function appendLeadCsv(file: string, lead: Record<string, unknown>, seen?: Set<string>): boolean {
   const row = pivotLeads([lead])[0];
+  const id = row.id === undefined ? undefined : String(row.id);
+  if (id && seen?.has(id)) return false;
   if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
     fs.writeFileSync(file, formatOutput([row], 'csv') + '\n');
-    return;
+    if (id) seen?.add(id);
+    return true;
   }
   // Keep the existing column order; answers to fields not in the header are dropped.
-  const header = fs.readFileSync(file, 'utf8').split(/\r?\n/, 1)[0].split(',').map(h => h.replace(/^"|"$/g, ''));
+  // Parse the header as CSV so quoted names containing commas stay aligned.
+  const firstLine = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '').split(/\r?\n/, 1)[0];
+  const header = parseCsv(firstLine)[0] ?? [];
   const missing = Object.keys(row).filter(k => !header.includes(k));
   if (missing.length) console.error(`Warning: lead ${row.id} has fields not in ${file}'s header, skipped: ${missing.join(', ')}`);
   const ordered: Record<string, unknown> = {};
   for (const h of header) ordered[h] = row[h] ?? '';
   const csv = formatOutput([ordered], 'csv');
   fs.appendFileSync(file, csv.slice(csv.indexOf('\n') + 1) + '\n');
+  if (id) seen?.add(id);
+  return true;
 }
 
 export interface WebhookListenerOptions {
@@ -203,10 +224,21 @@ export function registerWebhookCommands(program: Command, getClient: () => MetaC
       const streamLeads = Boolean(opts.leadsCsv || opts.forwardUrl);
       const client = streamLeads ? getClient() : undefined;
 
+      const seenLeads = opts.leadsCsv ? leadIdsInCsv(opts.leadsCsv) : new Set<string>();
       const handleLead = async (leadgenId: string) => {
+        if (seenLeads.has(leadgenId)) {
+          console.error(`Lead ${leadgenId} already saved; skipping redelivery`);
+          return;
+        }
         const response = await client!.request(leadgenId, { params: { fields: LEAD_FIELDS } });
         const lead = response.data as Record<string, unknown>;
-        if (opts.leadsCsv) appendLeadCsv(opts.leadsCsv, lead);
+        // In dry-run/plan the read returns a stub, not a lead: don't store or forward it.
+        if (client!.isPreviewMode() || lead.dryRun || lead.planned) {
+          console.error(`Preview mode: lead ${leadgenId} not saved or forwarded`);
+          return;
+        }
+        if (opts.leadsCsv && !appendLeadCsv(opts.leadsCsv, lead, seenLeads)) return;
+        if (!opts.leadsCsv) seenLeads.add(leadgenId);
         if (opts.forwardUrl) {
           const r = await fetch(opts.forwardUrl, {
             method: 'POST',

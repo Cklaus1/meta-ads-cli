@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, UsageError } from '../errors.js';
 import { parseJsonInput } from '../json-input.js';
 import { deriveMetrics, PERFORMANCE_FIELDS } from '../metrics.js';
 import { insightsTimeParams } from '../time-range.js';
@@ -14,6 +14,12 @@ function getDefaultAccountId(): string {
  * Parse a price like "29.99 USD", "29,99 EUR" or "1000 JPY" into Meta's
  * minor-unit amount (cents for USD, whole yen for JPY) and currency.
  */
+/** item_type values for POST /{catalog_id}/items_batch (catalog item types guide). */
+export const CATALOG_ITEM_TYPES = [
+  'PRODUCT_ITEM', 'APP_AND_SOFTWARE', 'DESTINATION', 'FLIGHT', 'HOME_LISTING', 'HOTEL', 'HOTEL_ROOM',
+  'MEDIA_TITLE', 'STORE_PRODUCT_ITEM', 'VEHICLE', 'VEHICLE_OFFER',
+];
+
 export function parsePrice(input: string, defaultCurrency = 'USD'): { amount: number; currency: string } {
   const match = String(input).trim().match(/^([\d.,]+)\s*([A-Za-z]{3})?$/);
   if (!match) {
@@ -281,8 +287,14 @@ export function registerCatalogCommands(program: Command, getClient: () => MetaC
         body.currency = currency = price.currency;
       }
       if (opts.salePrice) {
+        // Without --price there's no currency to inherit, and assuming USD
+        // would scale a JPY sale price 100×.
+        if (!currency && !/[A-Za-z]{3}\s*$/.test(String(opts.salePrice).trim())) {
+          throw new UsageError('--sale-price needs a currency (e.g. "19.99 USD") when --price is not given');
+        }
         const sale = parsePrice(opts.salePrice, currency);
         body.sale_price = String(sale.amount);
+        body.sale_price_currency = sale.currency;
       }
 
       if (Object.keys(body).length === 0) {
@@ -545,16 +557,34 @@ export function registerCatalogCommands(program: Command, getClient: () => MetaC
 
   catalog
     .command('batch <catalogId>')
-    .description('Bulk create/update/delete products via batch API (up to 30MB)')
-    .requiredOption('--requests <json>', 'JSON array of batch requests: [{method, retailer_id, data: {...}}, ...]')
-    .option('--allow-upsert', 'Allow updates alongside creation')
+    .description('Bulk create/update/delete catalog items via the items_batch API (up to 5000 records per call)')
+    .requiredOption('--requests <json>', 'JSON array (inline, @file or -) of [{"method":"CREATE|UPDATE|DELETE","data":{"id":"sku-1",...}}, ...]')
+    .option('--item-type <type>', `Item type: ${CATALOG_ITEM_TYPES.join(', ')}`, 'PRODUCT_ITEM')
+    .option('--no-allow-upsert', 'Don\'t let UPDATE requests create missing items (Meta allows it by default)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (catalogId: string, opts) => {
+      const itemType = String(opts.itemType).toUpperCase();
+      if (!CATALOG_ITEM_TYPES.includes(itemType)) {
+        throw new UsageError(`--item-type must be one of: ${CATALOG_ITEM_TYPES.join(', ')}, got: "${opts.itemType}"`);
+      }
+      const requests = parseJsonInput<unknown>(opts.requests, '--requests');
+      if (!Array.isArray(requests) || requests.length === 0) {
+        throw new UsageError('--requests must be a non-empty JSON array');
+      }
+      if (requests.length > 5000) throw new UsageError(`--requests has ${requests.length} records; items_batch accepts at most 5000`);
+      for (const [i, r] of requests.entries()) {
+        const rec = r as Record<string, unknown>;
+        if (!rec || typeof rec !== 'object' || !['CREATE', 'UPDATE', 'DELETE'].includes(String(rec.method).toUpperCase())
+          || typeof rec.data !== 'object' || rec.data === null) {
+          throw new UsageError(`--requests[${i}] must be {"method":"CREATE|UPDATE|DELETE","data":{...}}`);
+        }
+      }
       const client = getClient();
       const body: Record<string, string> = {
-        requests: opts.requests,
+        item_type: itemType,
+        requests: JSON.stringify(requests),
+        allow_upsert: opts.allowUpsert ? 'true' : 'false',
       };
-      if (opts.allowUpsert) body.allow_upsert = 'true';
 
       const response = await client.request(`${catalogId}/items_batch`, {
         method: 'POST',

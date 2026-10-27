@@ -93,8 +93,8 @@ describe('insights (#10, #11, #30)', () => {
       if (endpoint === 'r1/insights') return { data: { data: [{ spend: '1.00' }] }, status: 200 };
       throw new Error(`unexpected ${endpoint} ${JSON.stringify(opts)}`);
     });
-    const { stdout } = await run(registerInsightCommands, client, ['insights', 'async', 'act_1', '--poll-interval', '0', '--attribution-windows', '7d_click']);
-    expect(request.mock.calls[0][1]).toMatchObject({ method: 'POST', body: { action_attribution_windows: '["7d_click"]' } });
+    const { stdout } = await run(registerInsightCommands, client, ['insights', 'async', 'act_1', '--poll-interval', '1', '--attribution-windows', '7d_click']);
+    expect(request.mock.calls[0][1]).toMatchObject({ method: 'POST', readLike: true, body: { action_attribution_windows: '["7d_click"]' } });
     expect(polls).toBe(2);
     expect(stdout).toContain('1.00');
   });
@@ -104,7 +104,7 @@ describe('insights (#10, #11, #30)', () => {
       endpoint === 'act_1/insights' ? { data: { report_run_id: 'r1' }, status: 200 }
         : { data: { async_status: 'Job Failed', error_user_msg: 'Too much data' }, status: 200 }
     ));
-    await expect(run(registerInsightCommands, client, ['insights', 'async', 'act_1', '--poll-interval', '0'])).rejects.toThrow('Too much data');
+    await expect(run(registerInsightCommands, client, ['insights', 'async', 'act_1', '--poll-interval', '1'])).rejects.toThrow('Too much data');
   });
 });
 

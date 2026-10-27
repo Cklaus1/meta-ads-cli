@@ -149,11 +149,14 @@ export async function resolveProfile(name: string): Promise<Profile | undefined>
  * the default profile, so an explicit env var isn't silently overridden).
  */
 export async function applyProfile(name: string, opts: { onlyUnset?: boolean } = {}): Promise<void> {
-  const profile = await resolveProfile(name);
+  // A default profile can't override an env token, so don't pay for (or
+  // fail on) a keychain read in that case.
+  const envToken = process.env.META_ADS_CLI_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+  const profile = opts.onlyUnset && envToken ? getProfile(name) : await resolveProfile(name);
   if (!profile) {
     throw new Error(`Profile "${name}" not found. Use: meta-ads profile list`);
   }
-  if (profile.secretsInKeychain && !profile.accessToken) {
+  if (profile.secretsInKeychain && !profile.accessToken && !(opts.onlyUnset && envToken)) {
     throw new Error(`Profile "${name}" keeps its token in the OS keychain, which isn't available here.`);
   }
 
