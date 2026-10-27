@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `auth refresh-token --update-env <file>` exchanges the token in an `.env` file for a new long-lived one. It verifies the new token (valid, same user, expires no sooner) before rewriting that one line, never prints tokens, and exits 2 when the token is about to expire and Meta didn't extend it (`--warn-days`, default 14). Meant for a weekly systemd timer or cron job; see README.
+
 ## 0.4.1 — 2026-10-27
 
 Fixes the 45 findings in [docs/BUG_SPEC_2.md](docs/BUG_SPEC_2.md).
