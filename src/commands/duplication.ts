@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
+import { assertCopyableCampaign } from './campaigns.js';
 import { handleErrors } from '../errors.js';
 
 /** Meta's /copies rename_options, so the copy gets the requested suffix. */
@@ -20,6 +21,11 @@ export function registerDuplicationCommands(program: Command, getClient: () => M
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (campaignId: string, opts) => {
       const client = getClient();
+
+      if (!client.isDryRun()) {
+        const original = await client.request(campaignId, { params: { fields: 'smart_promotion_type' } });
+        assertCopyableCampaign(original.data as Record<string, unknown>, campaignId);
+      }
 
       // Copy campaign via the API's built-in copies endpoint
       const copyBody: Record<string, string> = {

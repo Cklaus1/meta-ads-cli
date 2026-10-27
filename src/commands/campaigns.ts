@@ -7,6 +7,33 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/**
+ * Meta requires is_adset_budget_sharing_enabled when a campaign has no
+ * campaign-level budget (the ad sets carry the budget). Sets it to the given
+ * value, defaulting to false, and leaves campaigns with a budget untouched.
+ */
+export function applyAdsetBudgetSharing(body: Record<string, string>, sharing?: boolean | string): Record<string, string> {
+  const hasCampaignBudget = Boolean(body.daily_budget) || Boolean(body.lifetime_budget);
+  if (!hasCampaignBudget && body.is_adset_budget_sharing_enabled === undefined) {
+    body.is_adset_budget_sharing_enabled = String(sharing === true || sharing === 'true');
+  }
+  return body;
+}
+
+/** Advantage+ Shopping/App campaign types Meta no longer lets the API create or copy. */
+export const BLOCKED_SMART_PROMOTION_TYPES = new Set(['AUTOMATED_SHOPPING_ADS', 'SMART_APP_PROMOTION']);
+
+/** Throw if a campaign's data shows it is an Advantage+ Shopping/App campaign, which Meta blocks copying via API. */
+export function assertCopyableCampaign(campaign: Record<string, unknown>, campaignId: string): void {
+  const type = campaign.smart_promotion_type;
+  if (typeof type === 'string' && BLOCKED_SMART_PROMOTION_TYPES.has(type)) {
+    throw new Error(
+      `Campaign ${campaignId} is an Advantage+ ${type === 'SMART_APP_PROMOTION' ? 'App' : 'Shopping'} campaign (${type}). `
+      + 'Meta no longer allows creating, copying or editing these via the API. Recreate it as a standard campaign instead.',
+    );
+  }
+}
+
 export function registerCampaignCommands(program: Command, getClient: () => MetaClient): void {
   const campaigns = program.command('campaigns').alias('camp').description('Campaign management');
 
@@ -54,7 +81,7 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
     .action(handleErrors(async (campaignId: string, opts) => {
       const client = getClient();
       const params: Record<string, string> = {
-        fields: 'id,name,objective,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,spend_cap,buying_type,bid_strategy,start_time,stop_time,created_time,updated_time,special_ad_categories,special_ad_category_country,pacing_type,promoted_object,issues_info,adlabels,is_budget_schedule_enabled,source_campaign_id,smart_promotion_type',
+        fields: 'id,name,objective,status,effective_status,configured_status,daily_budget,lifetime_budget,budget_remaining,spend_cap,buying_type,bid_strategy,start_time,stop_time,created_time,updated_time,special_ad_categories,special_ad_category_country,pacing_type,promoted_object,issues_info,adlabels,is_budget_schedule_enabled,is_adset_budget_sharing_enabled,source_campaign_id,smart_promotion_type',
       };
 
       const response = await client.request(campaignId, { params });
@@ -80,6 +107,7 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
     .option('--pacing-type <type>', 'Pacing type (standard, no_pacing)')
     .option('--cbo', 'Enable campaign budget optimization')
     .option('--adset-level-budgets', 'Use ad set level budgets instead of campaign level')
+    .option('--adset-budget-sharing', 'With ad set budgets, let ad sets share up to 20% of budget (is_adset_budget_sharing_enabled)')
     .option('--start-time <time>', 'Campaign start time (ISO 8601)')
     .option('--stop-time <time>', 'Campaign stop time (ISO 8601)')
     .option('--adlabels <json>', 'Ad labels as JSON array')
@@ -113,6 +141,7 @@ export function registerCampaignCommands(program: Command, getClient: () => Meta
       if (opts.startTime) body.start_time = opts.startTime;
       if (opts.stopTime) body.stop_time = opts.stopTime;
       if (opts.adlabels) body.adlabels = opts.adlabels;
+      applyAdsetBudgetSharing(body, opts.adsetBudgetSharing);
 
       const response = await client.request(`${opts.accountId}/campaigns`, {
         method: 'POST',

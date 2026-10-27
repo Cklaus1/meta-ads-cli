@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { handleErrors } from '../errors.js';
 import { AuthManager, authScope } from '../auth.js';
 
 export function registerAuthCommands(program: Command, getAuth: () => AuthManager): void {
@@ -7,7 +8,7 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
   auth
     .command('login')
     .description('Login via Meta OAuth flow (opens browser)')
-    .action(async () => {
+    .action(handleErrors(async () => {
       const authManager = getAuth();
       await authManager.initialize();
       try {
@@ -22,22 +23,22 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
         console.error('Login failed:', (err as Error).message);
         process.exit(1);
       }
-    });
+    }));
 
   auth
     .command('logout')
     .description('Log out and clear saved credentials')
-    .action(async () => {
+    .action(handleErrors(async () => {
       const authManager = getAuth();
       await authManager.initialize();
       await authManager.logout();
       console.log('Logged out successfully.');
-    });
+    }));
 
   auth
     .command('status')
     .description('Verify current login status')
-    .action(async () => {
+    .action(handleErrors(async () => {
       const authManager = getAuth();
       await authManager.initialize();
       const result = await authManager.verifyLogin();
@@ -47,12 +48,12 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
       } else {
         console.log('Not logged in. Run: meta-ads auth login');
       }
-    });
+    }));
 
   auth
     .command('setup')
     .description('Configure Meta App credentials')
-    .action(async () => {
+    .action(handleErrors(async () => {
       console.log('Meta Ads CLI Setup');
       console.log('==================\n');
       console.log('To use this CLI, you need a Meta App with Ads API access.');
@@ -65,12 +66,12 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
       console.log('Optional: Set a default ad account:');
       console.log('  META_ADS_CLI_ACCOUNT_ID=act_XXXXXXXXX\n');
       console.log('After configuration, run: meta-ads auth login');
-    });
+    }));
 
   auth
     .command('login-link')
     .description('Generate a login URL for authentication')
-    .action(async () => {
+    .action(handleErrors(async () => {
       const authManager = getAuth();
       const appId = authManager.getAppId();
       if (!appId) {
@@ -81,13 +82,13 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
         + `&redirect_uri=${encodeURIComponent('http://localhost:8899/callback')}&scope=${encodeURIComponent(authScope())}&response_type=token`;
       console.log('\nOpen this URL in your browser to authenticate:\n');
       console.log(`  ${url}\n`);
-    });
+    }));
 
   auth
     .command('refresh-token')
     .description('Exchange the current token for a long-lived one and cache it')
     .option('--print', 'Also print the full new token to stdout (for piping)')
-    .action(async (opts) => {
+    .action(handleErrors(async (opts) => {
       const authManager = getAuth();
       await authManager.initialize();
       try {
@@ -118,5 +119,5 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
         console.error('Token refresh failed:', (err as Error).message);
         process.exit(1);
       }
-    });
+    }));
 }

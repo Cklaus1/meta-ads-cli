@@ -31,3 +31,22 @@ describe('waitForContainer', () => {
     expect(request).not.toHaveBeenCalled();
   });
 });
+
+describe('Instagram insights defaults (META_API_UPDATES #5)', () => {
+  it('uses current metrics with total_value for account insights', async () => {
+    const { Command } = await import('commander');
+    const { registerInstagramCommands } = await import('../../src/commands/instagram.js');
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const request = vi.fn().mockResolvedValue({ data: {}, status: 200 });
+    const program = new Command();
+    registerInstagramCommands(program, () => ({ request } as unknown as MetaClient));
+    await program.parseAsync(['node', 'meta-ads', 'instagram', 'insights', '1']);
+    await program.parseAsync(['node', 'meta-ads', 'instagram', 'media-insights', '2']);
+    const [account, media] = request.mock.calls.map(c => c[1].params);
+    expect(account.metric_type).toBe('total_value');
+    for (const p of [account, media]) {
+      expect(p.metric).toContain('views');
+      expect(p.metric).not.toMatch(/impressions|profile_views|website_clicks|video_views/);
+    }
+  });
+});

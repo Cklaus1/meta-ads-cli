@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
+import { assertCopyableCampaign } from './campaigns.js';
 import { handleErrors } from '../errors.js';
 import { resolveTimeRange } from '../time-range.js';
 
@@ -53,7 +54,7 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
 
       // Get original campaign
       const origParams: Record<string, string> = {
-        fields: 'id,name,objective,status,daily_budget,lifetime_budget,bid_strategy,special_ad_categories',
+        fields: 'id,name,objective,status,daily_budget,lifetime_budget,bid_strategy,special_ad_categories,smart_promotion_type',
       };
       const split = Number(opts.budgetSplit);
       if (!Number.isFinite(split) || split <= 0 || split >= 1) {
@@ -62,6 +63,7 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
 
       const origResponse = await client.request(opts.campaignId, { params: origParams });
       const original = origResponse.data as Record<string, unknown>;
+      assertCopyableCampaign(original, opts.campaignId);
       // In dry-run the GET returns a placeholder, so there is no real budget to split.
       const plan = original.dryRun
         ? { field: 'daily_budget' as const, control: 0, variant: 0 }

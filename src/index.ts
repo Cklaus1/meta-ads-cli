@@ -49,7 +49,7 @@ const program = new Command();
 program
   .name('meta-ads')
   .description('Meta Ads CLI - Manage Facebook & Instagram advertising via the Graph API')
-  .version('0.2.0')
+  .version('0.3.0')
   .option('--dry-run', 'Preview the API request without executing it')
   .option('--read-only', 'Restrict to read-only operations (block POST/DELETE)')
   .option('--max-spend-cap <cents>', 'Block any write whose budget field (daily/lifetime/spend_cap/bid) exceeds this many cents')

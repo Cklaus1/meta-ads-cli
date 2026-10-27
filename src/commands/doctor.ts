@@ -1,4 +1,7 @@
 import { Command } from 'commander';
+import fs from 'fs';
+import path from 'path';
+import { CONFIG_DIR } from '../private-file.js';
 import { AuthManager } from '../auth.js';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
@@ -21,10 +24,16 @@ const ICON: Record<CheckStatus, string> = {
   info: 'ℹ',
 };
 
-// Graph API versions known to be on a deprecation path or past it (as of v25 era).
-// Calls below v22.0 are rejected by Meta; the current version is v25.0.
-const MIN_SUPPORTED_VERSION = 22;
-const CURRENT_VERSION = 25;
+// Most commands call Marketing API endpoints, whose versions expire well
+// before the matching Graph API version. Calls to an expired Marketing API
+// version are auto-upgraded only for unchanged endpoints; the rest fail.
+// Source: developers.facebook.com/docs/graph-api/changelog (checked 2026-10-27).
+const MIN_SUPPORTED_VERSION = 24;
+const CURRENT_VERSION = 26;
+const MARKETING_API_EXPIRY: Record<number, string> = {
+  24: '2026-11-10',
+  25: '2027-02-23',
+};
 
 // Scopes the CLI's major command groups depend on.
 const SCOPE_REQUIREMENTS: Array<{ scope: string; enables: string }> = [
@@ -41,6 +50,32 @@ const SCOPE_REQUIREMENTS: Array<{ scope: string; enables: string }> = [
 function parseMajorVersion(v: string): number {
   const m = /v?(\d+)/.exec(v);
   return m ? parseInt(m[1], 10) : NaN;
+}
+
+/**
+ * Flag credential files (and the config dir) that other users can read.
+ * Files written by current versions are 0600, but older ones may not be.
+ */
+export function credentialPermissionChecks(
+  files: string[] = [CONFIG_DIR, path.join(CONFIG_DIR, 'token-cache.json'), path.join(CONFIG_DIR, 'profiles.json'), path.resolve('.env')],
+): Check[] {
+  if (process.platform === 'win32') return [];
+  const loose: string[] = [];
+  for (const file of files) {
+    try {
+      const mode = fs.statSync(file).mode & 0o777;
+      if (mode & 0o077) loose.push(`${file} (${mode.toString(8)})`);
+    } catch { /* missing files are fine */ }
+  }
+  if (loose.length === 0) {
+    return [{ name: 'Credential file permissions', status: 'ok', detail: 'Token, profile and .env files are private to you.' }];
+  }
+  return [{
+    name: 'Credential file permissions',
+    status: 'warn',
+    detail: `Readable by other users: ${loose.join(', ')}`,
+    fix: `chmod 700 ${CONFIG_DIR} && chmod 600 <file>`,
+  }];
 }
 
 export function registerDoctorCommand(
@@ -170,11 +205,14 @@ export function registerDoctorCommand(
           fix: `Upgrade to v${CURRENT_VERSION}.0.`,
         });
       } else if (major < CURRENT_VERSION) {
+        const expiry = MARKETING_API_EXPIRY[major];
+        const expired = expiry !== undefined && Date.now() >= Date.parse(`${expiry}T00:00:00Z`);
         checks.push({
           name: 'API version',
-          status: 'warn',
-          detail: `${configuredVersion} is older than the current v${CURRENT_VERSION}.0.`,
-          fix: `Consider upgrading to v${CURRENT_VERSION}.0.`,
+          status: expired ? 'fail' : 'warn',
+          detail: `${configuredVersion} is older than the current v${CURRENT_VERSION}.0.`
+            + (expiry ? ` Marketing API ${configuredVersion} ${expired ? 'expired' : 'expires'} ${expiry}.` : ''),
+          fix: `Upgrade to v${CURRENT_VERSION}.0 (--api-version or META_ADS_CLI_API_VERSION).`,
         });
       } else {
         checks.push({ name: 'API version', status: 'ok', detail: `${configuredVersion} (current).` });
@@ -184,8 +222,10 @@ export function registerDoctorCommand(
       checks.push({
         name: 'Deprecation watch',
         status: 'info',
-        detail: 'Legacy reach metrics retire ~Jun 2026 (→ "Views"); ASC/AAC campaign edits via API end ~May/Sep 2026; metadata=1 removed ~May 2026.',
-        fix: 'Plan migrations for any legacy Advantage+ Shopping/App campaigns and reach-based reporting.',
+        detail: 'Advantage+ Shopping/App campaigns can no longer be created, copied or edited via API (since 2026-05-19). '
+          + 'Housing/employment/financial ad sets with narrowed targeting must set the Advantage+ audience flag (2026-10-27). '
+          + 'Lookalike country settings are ignored (2026-09-01). 7d_view/28d_view attribution returns no data (2026-01-12).',
+        fix: 'See docs/META_API_UPDATES.md for the full list and what the CLI changed.',
       });
 
       // ── 6. Default account access + rate-limit usage ───────────────────────
@@ -230,6 +270,9 @@ export function registerDoctorCommand(
           fix: 'Set META_ADS_CLI_ACCOUNT_ID or pass --account-id to test access.',
         });
       }
+
+      // ── 6a. Credential file permissions ───────────────────────────────────
+      for (const check of credentialPermissionChecks()) checks.push(check);
 
       // ── 6b. Safety guards (spend cap) ──────────────────────────────────────
       {

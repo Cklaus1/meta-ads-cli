@@ -87,6 +87,10 @@ meta-ads --dry-run --max-spend-cap 1000 campaigns create --daily-budget 5000 ...
   request body the CLI constructs. It cannot police spend that happens through
   Meta's own optimization once a campaign is live — only the *budget you set* via
   the CLI.
+- **Caps the budget you set, not what Meta spends in a day.** Meta may spend up
+  to 75% over a daily budget on a given day (1.75×), while keeping the week
+  within 7× the daily budget. A `daily_budget` of 10000¢ under a 10000¢ cap can
+  still see $175 of spend on a single day.
 - **Per-field, not cumulative.** It caps each individual budget field on each
   write; it does not track total spend across many campaigns. For a true account
   ceiling, use Meta's account-level `spend_cap` (section 3).

@@ -254,7 +254,7 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
   pages
     .command('insights <pageId>')
     .description('Get page-level insights and metrics')
-    .option('--metrics <list>', 'Comma-separated metrics', 'page_fans,page_fan_adds,page_views_total,page_engaged_users,page_post_engagements,page_impressions,page_actions_post_reactions_total')
+    .option('--metrics <list>', 'Comma-separated metrics (page_fans/page_impressions/page_engaged_users were removed)', 'page_follows,page_media_view,page_total_media_view_unique,page_views_total,page_post_engagements,page_actions_post_reactions_total')
     .option('--period <period>', 'Aggregation period: day, week, days_28, month, lifetime', 'day')
     .option('--time-range <range>', 'Time range', 'last_30d')
     .option('--date-start <date>', 'Start date (YYYY-MM-DD)')
@@ -287,7 +287,7 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
   pages
     .command('post-insights <postId>')
     .description('Get insights for a specific post')
-    .option('--metrics <list>', 'Comma-separated metrics', 'post_impressions,post_impressions_unique,post_engaged_users,post_clicks,post_reactions_by_type_total')
+    .option('--metrics <list>', 'Comma-separated metrics (post_impressions*/post_engaged_users were removed)', 'post_media_view,post_total_media_view_unique,post_clicks,post_reactions_by_type_total')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (postId: string, opts) => {
       const client = getClient();

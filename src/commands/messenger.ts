@@ -3,6 +3,21 @@ import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 
+// Meta removed these tags on 2026-04-27; sending them returns error 100.
+const REMOVED_TAGS = new Set(['CONFIRMED_EVENT_UPDATE', 'POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE']);
+
+/** Validate a message tag, rejecting the ones Meta no longer accepts. */
+export function checkMessageTag(tag: string): string {
+  const upper = tag.toUpperCase();
+  if (REMOVED_TAGS.has(upper)) {
+    throw new Error(
+      `Message tag ${upper} was removed by Meta (April 2026). Use HUMAN_AGENT for human replies within 7 days, `
+      + 'or send a utility message template for event, purchase and account updates.',
+    );
+  }
+  return upper;
+}
+
 export function registerMessengerCommands(program: Command, getClient: () => MetaClient): void {
   const msg = program.command('messenger').description('Messenger: send messages, manage bots, sponsored messages');
 
@@ -13,7 +28,7 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
     .option('--text <message>', 'Text message to send')
     .option('--attachment <json>', 'Attachment payload as JSON (type, url)')
     .option('--quick-replies <json>', 'Quick replies as JSON array')
-    .option('--tag <tag>', 'Message tag: CONFIRMED_EVENT_UPDATE, POST_PURCHASE_UPDATE, ACCOUNT_UPDATE, HUMAN_AGENT')
+    .option('--tag <tag>', 'Message tag for replies outside the 24h window: HUMAN_AGENT')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (pageId: string, opts) => {
       const client = getClient();
@@ -31,7 +46,7 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
         message: JSON.stringify(message),
         messaging_type: opts.tag ? 'MESSAGE_TAG' : 'RESPONSE',
       };
-      if (opts.tag) body.tag = opts.tag;
+      if (opts.tag) body.tag = checkMessageTag(opts.tag);
 
       const accessToken = await client.getPageToken(pageId);
       const response = await client.request(`${pageId}/messages`, { method: 'POST', body, accessToken });

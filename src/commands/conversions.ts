@@ -42,6 +42,27 @@ export function hashUserData(userData: Record<string, unknown>): Record<string, 
   return out;
 }
 
+/**
+ * Convert legacy offline-event objects to Conversions API events: default
+ * action_source to physical_store and event_time to now, and fold the old
+ * match_keys into user_data.
+ */
+export function toPhysicalStoreEvents(events: Array<Record<string, unknown>>, hash = true): Array<Record<string, unknown>> {
+  return events.map((raw) => {
+    const event: Record<string, unknown> = { ...raw };
+    if (!event.event_time) event.event_time = Math.floor(Date.now() / 1000);
+    if (!event.action_source) event.action_source = 'physical_store';
+    if (event.match_keys && typeof event.match_keys === 'object') {
+      event.user_data = { ...(event.match_keys as Record<string, unknown>), ...((event.user_data as Record<string, unknown>) || {}) };
+      delete event.match_keys;
+    }
+    if (hash && event.user_data && typeof event.user_data === 'object') {
+      event.user_data = hashUserData(event.user_data as Record<string, unknown>);
+    }
+    return event;
+  });
+}
+
 export function registerConversionCommands(program: Command, getClient: () => MetaClient): void {
   const conversions = program.command('conversions').alias('conv').description('Conversions API and server-side tracking');
 
@@ -189,78 +210,59 @@ export function registerConversionCommands(program: Command, getClient: () => Me
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
+  // ── Offline Conversions (migrated) ────────────────────
+  // Meta discontinued the Offline Conversions API (offline_conversion_data_sets,
+  // {event_set}/events) in May 2025. Offline events now go to a dataset through
+  // the Conversions API with action_source=physical_store.
+
   conversions
     .command('offline-events')
-    .description('Send offline conversion events (in-store purchases, phone orders)')
-    .requiredOption('--event-set-id <id>', 'Offline event set ID')
-    .requiredOption('--events <json>', 'JSON array of offline event objects')
-    .option('--no-hash', 'Send user_data/match_keys as given (values are already normalized and hashed)')
+    .description('Send offline (in-store, phone) events to a dataset via the Conversions API (action_source=physical_store)')
+    .option('--dataset-id <id>', 'Dataset (pixel) ID to send to')
+    .option('--event-set-id <id>', 'Deprecated alias for --dataset-id')
+    .requiredOption('--events <json>', 'JSON array of event objects')
+    .option('--no-hash', 'Send user_data as given (values are already normalized and hashed)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
-      const client = getClient();
-      const events = JSON.parse(opts.events) as Array<Record<string, unknown>>;
-
-      for (const event of events) {
-        if (!event.event_time) {
-          event.event_time = Math.floor(Date.now() / 1000);
-        }
-        if (!opts.hash) continue;
-        for (const key of ['user_data', 'match_keys']) {
-          if (event[key] && typeof event[key] === 'object') {
-            event[key] = hashUserData(event[key] as Record<string, unknown>);
-          }
-        }
+      const datasetId = opts.datasetId || opts.eventSetId;
+      if (!datasetId) throw new Error('--dataset-id is required (find yours with: meta-ads conversions datasets)');
+      if (opts.eventSetId && !opts.datasetId) {
+        console.error('Note: offline event sets were replaced by datasets. Sending to the dataset with this ID; use --dataset-id from now on.');
       }
-
-      const body: Record<string, string> = {
-        data: JSON.stringify(events),
-      };
-
-      const response = await client.request(`${opts.eventSetId}/events`, {
+      const client = getClient();
+      const events = toPhysicalStoreEvents(JSON.parse(opts.events) as Array<Record<string, unknown>>, opts.hash);
+      const response = await client.request(`${datasetId}/events`, {
         method: 'POST',
-        body,
+        body: { data: JSON.stringify(events) },
       });
-
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
   conversions
     .command('offline-event-sets')
-    .description('List offline event sets for an account')
+    .description('Deprecated: offline event sets were replaced by datasets. Lists datasets instead')
     .option('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
+      console.error('Note: the Offline Conversions API was discontinued; listing datasets instead (meta-ads conversions datasets).');
       const client = getClient();
-      const params: Record<string, string> = {
-        fields: 'id,name,description,event_stats,data_use_setting,creation_time',
-      };
-
-      const response = await client.request(`${opts.accountId}/offline_conversion_data_sets`, { params });
+      const response = await client.request(`${opts.accountId}/datasets`, {
+        params: { fields: 'id,name,description,creation_time,usage' },
+      });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
   conversions
     .command('create-offline-set')
-    .description('Create an offline event set')
-    .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
-    .requiredOption('--name <name>', 'Event set name')
-    .option('--description <text>', 'Event set description')
-    .option('-o, --output <format>', 'Output format', 'json')
-    .action(handleErrors(async (opts) => {
-      if (!opts.accountId) throw new Error('Account ID required');
-      const client = getClient();
-      const body: Record<string, string> = {
-        name: opts.name,
-      };
-      if (opts.description) body.description = opts.description;
-
-      const response = await client.request(`${opts.accountId}/offline_conversion_data_sets`, {
-        method: 'POST',
-        body,
-      });
-
-      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    .description('Removed: offline event sets were replaced by datasets')
+    .allowUnknownOption()
+    .action(handleErrors(async () => {
+      throw new Error(
+        'Offline event sets can no longer be created: Meta discontinued the Offline Conversions API in May 2025. '
+        + 'Use a dataset instead (create one in Events Manager, list them with: meta-ads conversions datasets), '
+        + 'then send offline events with: meta-ads conversions offline-events --dataset-id <id> --events <json>',
+      );
     }));
 
   conversions
@@ -342,11 +344,20 @@ export function registerConversionCommands(program: Command, getClient: () => Me
     .description('Send events to a dataset (unified Conversions API)')
     .requiredOption('--events <json>', 'JSON array of event objects')
     .option('--test-event-code <code>', 'Test event code')
+    .option('--no-hash', 'Send user_data as given (values are already normalized and hashed)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (datasetId: string, opts) => {
       const client = getClient();
+      const events = JSON.parse(opts.events) as Array<Record<string, unknown>>;
+      if (opts.hash) {
+        for (const event of events) {
+          if (event.user_data && typeof event.user_data === 'object') {
+            event.user_data = hashUserData(event.user_data as Record<string, unknown>);
+          }
+        }
+      }
       const body: Record<string, string> = {
-        data: opts.events,
+        data: JSON.stringify(events),
       };
       if (opts.testEventCode) body.test_event_code = opts.testEventCode;
 

@@ -7,6 +7,95 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+export interface StoryUpdate {
+  caption?: string;
+  message?: string;
+  headline?: string;
+  description?: string;
+  linkUrl?: string;
+  cta?: string;
+}
+
+/**
+ * Merge text/link/CTA changes into an existing creative's spec, returning the
+ * body fields for a new creative. Handles link ads (link_data), video ads
+ * (video_data), photo posts (photo_data), catalog ads (template_data) and
+ * dynamic creative (asset_feed_spec, where each change replaces that asset list).
+ */
+export function mergeStoryUpdate(current: Record<string, unknown>, upd: StoryUpdate): Record<string, string> {
+  const spec = { ...((current.object_story_spec as Record<string, unknown>) || {}) };
+  const out: Record<string, string> = {};
+
+  const feed = current.asset_feed_spec as Record<string, unknown> | undefined;
+  if (feed) {
+    const next: Record<string, unknown> = { ...feed };
+    if (upd.message) next.bodies = [{ text: upd.message }];
+    if (upd.headline) next.titles = [{ text: upd.headline }];
+    if (upd.description) next.descriptions = [{ text: upd.description }];
+    if (upd.linkUrl || upd.caption) {
+      const prev = ((feed.link_urls as Record<string, unknown>[]) || [])[0] || {};
+      next.link_urls = [{
+        ...prev,
+        ...(upd.linkUrl ? { website_url: upd.linkUrl } : {}),
+        ...(upd.caption ? { display_url: upd.caption } : {}),
+      }];
+    }
+    if (upd.cta) next.call_to_action_types = [upd.cta];
+    out.asset_feed_spec = JSON.stringify(next);
+    if (Object.keys(spec).length) out.object_story_spec = JSON.stringify(spec);
+    return out;
+  }
+
+  if (spec.video_data) {
+    const video: Record<string, unknown> = { ...(spec.video_data as Record<string, unknown>) };
+    if (upd.message) video.message = upd.message;
+    if (upd.headline) video.title = upd.headline;
+    if (upd.description) video.link_description = upd.description;
+    if (upd.caption) throw new Error('--caption is not supported for video creatives');
+    if (upd.cta || upd.linkUrl) {
+      const prev = (video.call_to_action || {}) as Record<string, unknown>;
+      const prevValue = (prev.value || {}) as Record<string, unknown>;
+      const type = upd.cta || prev.type;
+      if (!type) throw new Error('Video creatives need a call to action for a link. Pass --cta too.');
+      video.call_to_action = { type, value: { ...prevValue, ...(upd.linkUrl ? { link: upd.linkUrl } : {}) } };
+    }
+    spec.video_data = video;
+  } else if (spec.photo_data) {
+    if (upd.headline || upd.description || upd.linkUrl || upd.cta) {
+      throw new Error('Photo post creatives only support --message (and --caption)');
+    }
+    const photo: Record<string, unknown> = { ...(spec.photo_data as Record<string, unknown>) };
+    if (upd.message || upd.caption) photo.caption = upd.message || upd.caption;
+    spec.photo_data = photo;
+  } else {
+    // link_data, or template_data for catalog ads (same field names).
+    const key = spec.template_data ? 'template_data' : 'link_data';
+    const link: Record<string, unknown> = { ...((spec[key] as Record<string, unknown>) || {}) };
+    if (upd.caption) link.caption = upd.caption;
+    if (upd.message) link.message = upd.message;
+    if (upd.headline) link.name = upd.headline;
+    if (upd.description) link.description = upd.description;
+    if (upd.linkUrl) link.link = upd.linkUrl;
+    if (upd.cta) {
+      const prev = (link.call_to_action || {}) as Record<string, unknown>;
+      link.call_to_action = { ...prev, type: upd.cta };
+    }
+    spec[key] = link;
+  }
+  out.object_story_spec = JSON.stringify(spec);
+  return out;
+}
+
+/**
+ * Since v26.0, eligible creatives default to destination_type WEBSITE_AND_SHOP
+ * when the advertiser has a shop; WEBSITE_AND_SHOP_OPT_OUT keeps them website-only.
+ */
+export function applyShopDestination(body: Record<string, string>, mode: string | undefined): void {
+  if (mode === undefined || mode === 'default') return;
+  if (mode !== 'opt-out') throw new Error(`--shop-destination must be "default" or "opt-out", got: "${mode}"`);
+  body.destination_spec = JSON.stringify({ destination_type: 'WEBSITE_AND_SHOP_OPT_OUT' });
+}
+
 export function registerCreativeCommands(program: Command, getClient: () => MetaClient): void {
   const creatives = program.command('creatives').description('Ad creative management');
 
@@ -82,6 +171,7 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
     .option('--url-tags <tags>', 'URL tracking tags appended to link')
     .option('--child-attachments <json>', 'JSON array for carousel ads')
     .option('--multi-share-optimized', 'Optimize carousel card order')
+    .option('--shop-destination <mode>', 'Shops ads destination: default (Meta sends eligible creatives to WEBSITE_AND_SHOP when you have a shop) or opt-out')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) {
@@ -110,6 +200,7 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
       if (opts.instagramActorId) objectStorySpec.instagram_user_id = opts.instagramActorId;
 
       body.object_story_spec = JSON.stringify(objectStorySpec);
+      applyShopDestination(body, opts.shopDestination);
 
       const response = await client.request(`${opts.accountId}/adcreatives`, {
         method: 'POST',
@@ -135,6 +226,7 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
     .option('--cta <type>', 'Call to action type', 'LEARN_MORE')
     .option('--thumbnail <hash>', 'Image hash for video thumbnail')
     .option('--url-tags <tags>', 'URL tracking tags appended to link')
+    .option('--shop-destination <mode>', 'Shops ads destination: default (Meta sends eligible creatives to WEBSITE_AND_SHOP when you have a shop) or opt-out')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) {
@@ -168,6 +260,7 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
       if (opts.instagramActorId) objectStorySpec.instagram_user_id = opts.instagramActorId;
 
       body.object_story_spec = JSON.stringify(objectStorySpec);
+      applyShopDestination(body, opts.shopDestination);
 
       const response = await client.request(`${opts.accountId}/adcreatives`, {
         method: 'POST',
@@ -287,24 +380,10 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
         // object_story_spec can't be edited on an existing creative, so build
         // a new creative from the merged spec.
         const current = await client.request(creativeId, {
-          params: { fields: 'name,account_id,object_story_spec' },
+          params: { fields: 'name,account_id,object_story_spec,asset_feed_spec' },
         });
         const currentData = current.data as Record<string, unknown>;
-        const currentSpec = currentData.object_story_spec as Record<string, unknown> || {};
-        const currentLinkData = (currentSpec.link_data || {}) as Record<string, unknown>;
-
-        const linkData: Record<string, unknown> = { ...currentLinkData };
-        if (opts.caption) linkData.caption = opts.caption;
-        if (opts.message) linkData.message = opts.message;
-        if (opts.headline) linkData.name = opts.headline;
-        if (opts.description) linkData.description = opts.description;
-        if (opts.linkUrl) linkData.link = opts.linkUrl;
-        if (opts.cta) linkData.call_to_action = { type: opts.cta };
-
-        body.object_story_spec = JSON.stringify({
-          ...currentSpec,
-          link_data: linkData,
-        });
+        Object.assign(body, mergeStoryUpdate(currentData, opts));
 
         const accountId = opts.accountId || (currentData.account_id ? `act_${currentData.account_id}` : '');
         if (!accountId) {

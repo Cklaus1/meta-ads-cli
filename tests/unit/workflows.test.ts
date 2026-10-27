@@ -48,12 +48,30 @@ describe('retargeting dynamic-campaign', () => {
   it('sends no ad set budget under a campaign budget', async () => {
     const { client, request } = mockClient(async (endpoint) => ({ data: { id: endpoint.endsWith('campaigns') ? '1' : '2' }, status: 200 }));
     await run(registerRetargetingCommands, client, [
-      'retargeting', 'dynamic-campaign', '--account-id', 'act_1', '--campaign-name', 'C', '--product-set-id', '3', '--page-id', '4',
+      'retargeting', 'dynamic-campaign', '--account-id', 'act_1', '--campaign-name', 'C', '--product-set-id', '3', '--page-id', '4', '--catalog-id', '9',
     ]);
     const adset = request.mock.calls.find(([e]) => e === 'act_1/adsets')?.[1]?.body;
     const camp = request.mock.calls.find(([e]) => e === 'act_1/campaigns')?.[1]?.body;
     expect(camp?.daily_budget).toBe('5000');
     expect(adset?.daily_budget).toBeUndefined();
     expect(adset?.campaign_id).toBe('1');
+  });
+
+  it('targets product viewers, excludes buyers, and sets the catalog', async () => {
+    const { client, request } = mockClient(async (endpoint) => (
+      endpoint === '3' ? { data: { product_catalog: { id: '77' } }, status: 200 }
+        : { data: { id: endpoint.endsWith('campaigns') ? '1' : '2' }, status: 200 }
+    ));
+    await run(registerRetargetingCommands, client, [
+      'retargeting', 'dynamic-campaign', '--account-id', 'act_1', '--campaign-name', 'C', '--product-set-id', '3', '--page-id', '4',
+      '--retention-days', '14',
+    ]);
+    const camp = request.mock.calls.find(([e]) => e === 'act_1/campaigns')?.[1]?.body;
+    const adset = request.mock.calls.find(([e]) => e === 'act_1/adsets')?.[1]?.body;
+    expect(JSON.parse(camp.promoted_object)).toEqual({ product_catalog_id: '77' });
+    expect(JSON.parse(adset.promoted_object)).toEqual({ product_set_id: '3', custom_event_type: 'PURCHASE' });
+    const spec = JSON.parse(adset.targeting).product_audience_specs[0];
+    expect(spec.inclusions.map((r: any) => r.rule.event.eq)).toEqual(['ViewContent', 'AddToCart']);
+    expect(spec.exclusions[0]).toEqual({ retention_seconds: 14 * 86400, rule: { event: { eq: 'Purchase' } } });
   });
 });

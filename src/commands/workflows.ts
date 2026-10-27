@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { planBudgetSplit } from './ab-testing.js';
+import { applyAdsetBudgetSharing, assertCopyableCampaign } from './campaigns.js';
 import { handleErrors } from '../errors.js';
 
 function getDefaultAccountId(): string {
@@ -16,6 +17,7 @@ function getDefaultAccountId(): string {
 export function buildLaunchBodies(opts: {
   name: string; objective: string; dailyBudget: string; budgetLevel?: string;
   optimizationGoal: string; billingEvent: string; targeting?: string; countries?: string;
+  adsetBudgetSharing?: boolean;
 }): { campaignBody: Record<string, string>; adsetBody: Record<string, string> } {
   const level = opts.budgetLevel || 'campaign';
   if (level !== 'campaign' && level !== 'adset') {
@@ -36,6 +38,7 @@ export function buildLaunchBodies(opts: {
   };
   if (level === 'campaign') campaignBody.daily_budget = opts.dailyBudget;
   else adsetBody.daily_budget = opts.dailyBudget;
+  applyAdsetBudgetSharing(campaignBody, opts.adsetBudgetSharing);
   return { campaignBody, adsetBody };
 }
 
@@ -181,6 +184,7 @@ export function registerWorkflowCommands(program: Command, getClient: () => Meta
     .option('--billing-event <event>', 'Billing event', 'IMPRESSIONS')
     .option('--targeting <json>', 'Targeting spec as JSON')
     .option('--countries <codes>', 'Comma-separated country codes, used when --targeting is not given', 'US')
+    .option('--adset-budget-sharing', 'With --budget-level adset, let ad sets share up to 20% of budget')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
@@ -235,8 +239,9 @@ export function registerWorkflowCommands(program: Command, getClient: () => Meta
       const client = getClient();
 
       // Split the campaign budget 50/50 so the test doesn't double spend.
-      const original = await client.request(campaignId, { params: { fields: 'daily_budget,lifetime_budget' } });
+      const original = await client.request(campaignId, { params: { fields: 'daily_budget,lifetime_budget,smart_promotion_type' } });
       const originalData = original.data as Record<string, unknown>;
+      assertCopyableCampaign(originalData, campaignId);
       const hasCampaignBudget = Number(originalData.daily_budget) > 0 || Number(originalData.lifetime_budget) > 0;
       const split = hasCampaignBudget ? planBudgetSplit(originalData, 0.5) : undefined;
 

@@ -67,7 +67,7 @@ describe('MetaClient', () => {
   describe('buildUrl', () => {
     it('builds URL with endpoint', () => {
       const url = client.buildUrl('me/adaccounts');
-      expect(url).toBe('https://graph.facebook.com/v25.0/me/adaccounts');
+      expect(url).toBe('https://graph.facebook.com/v26.0/me/adaccounts');
     });
 
     it('appends query parameters', () => {
@@ -84,7 +84,7 @@ describe('MetaClient', () => {
 
     it('skips params when empty', () => {
       const url = client.buildUrl('me', {});
-      expect(url).toBe('https://graph.facebook.com/v25.0/me');
+      expect(url).toBe('https://graph.facebook.com/v26.0/me');
     });
   });
 
@@ -483,9 +483,9 @@ describe('MetaClient', () => {
       expect(url).toContain('v19.0');
     });
 
-    it('defaults to v25.0', () => {
+    it('defaults to v26.0', () => {
       const url = client.buildUrl('me');
-      expect(url).toContain('v25.0');
+      expect(url).toContain('v26.0');
     });
   });
 });

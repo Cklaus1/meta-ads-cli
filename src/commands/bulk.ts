@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { applyAdsetBudgetSharing } from './campaigns.js';
 import { resolveTimeRange } from '../time-range.js';
 
 function getDefaultAccountId(): string {
@@ -28,7 +29,7 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
     .command('create-campaigns')
     .description('Create multiple campaigns from a JSON config')
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
-    .requiredOption('--config <json>', 'JSON array of campaign configs')
+    .requiredOption('--config <json>', 'JSON array of campaign configs (name, objective, status, daily_budget, lifetime_budget, bid_strategy, special_ad_categories, is_adset_budget_sharing_enabled)')
     .option('--batch-size <n>', 'Campaigns per batch', '5')
     .option('--delay-ms <ms>', 'Delay between batches', '2000')
     .option('-o, --output <format>', 'Output format', 'json')
@@ -54,7 +55,9 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
               special_ad_categories: JSON.stringify(config.special_ad_categories || []),
             };
             if (config.daily_budget) body.daily_budget = String(config.daily_budget);
+            if (config.lifetime_budget) body.lifetime_budget = String(config.lifetime_budget);
             if (config.bid_strategy) body.bid_strategy = String(config.bid_strategy);
+            applyAdsetBudgetSharing(body, config.is_adset_budget_sharing_enabled as boolean | string | undefined);
 
             const response = await client.request(`${opts.accountId}/campaigns`, { method: 'POST', body });
             return { success: true, name: config.name, data: response.data };

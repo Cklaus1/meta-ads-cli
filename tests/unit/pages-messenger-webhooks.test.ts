@@ -73,3 +73,24 @@ describe('Page token usage (BUG-19)', () => {
     expect(client.request).toHaveBeenCalledWith('111/subscribed_apps', expect.objectContaining({ method: 'POST', accessToken: 'PAGE_TOKEN' }));
   });
 });
+
+describe('current insights metrics and Messenger tags (META_API_UPDATES #4, #6)', () => {
+  let client: ReturnType<typeof mockClient>;
+  beforeEach(() => {
+    client = mockClient();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  it('page insights default to non-deprecated metrics', async () => {
+    await run(client, ['pages', 'insights', '111']);
+    const metric: string = client.request.mock.calls[0][1].params.metric;
+    expect(metric).toContain('page_media_view');
+    expect(metric).not.toMatch(/page_fans|page_impressions|page_engaged_users/);
+  });
+
+  it('rejects message tags Meta removed', async () => {
+    const { checkMessageTag } = await import('../../src/commands/messenger.js');
+    expect(() => checkMessageTag('ACCOUNT_UPDATE')).toThrow('removed by Meta');
+    expect(checkMessageTag('human_agent')).toBe('HUMAN_AGENT');
+  });
+});

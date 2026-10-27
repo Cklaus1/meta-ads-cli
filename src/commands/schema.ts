@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { handleErrors } from '../errors.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 
 interface EndpointSchema {
@@ -67,7 +68,7 @@ export function registerSchemaCommands(program: Command): void {
     .command('schema [service] [operation]')
     .description('Show API schema for services and operations')
     .option('-o, --output <format>', 'Output format', 'json')
-    .action((service: string | undefined, operation: string | undefined, opts: { output: string }) => {
+    .action(handleErrors(async (service: string | undefined, operation: string | undefined, opts: { output: string }) => {
       if (!service) {
         // List all services
         const services = Object.keys(ENDPOINTS).map(name => ({
@@ -107,5 +108,5 @@ export function registerSchemaCommands(program: Command): void {
         operation,
         ...op,
       }, opts.output as OutputFormat));
-    });
+    }));
 }
