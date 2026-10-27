@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { parseJsonInput } from '../json-input.js';
 
 // Meta removed these tags on 2026-04-27; sending them returns error 100.
 const REMOVED_TAGS = new Set(['CONFIRMED_EVENT_UPDATE', 'POST_PURCHASE_UPDATE', 'ACCOUNT_UPDATE']);
@@ -34,8 +35,8 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
       const client = getClient();
       const message: Record<string, unknown> = {};
       if (opts.text) message.text = opts.text;
-      if (opts.attachment) message.attachment = JSON.parse(opts.attachment);
-      if (opts.quickReplies) message.quick_replies = JSON.parse(opts.quickReplies);
+      if (opts.attachment) message.attachment = parseJsonInput(opts.attachment, '--attachment');
+      if (opts.quickReplies) message.quick_replies = parseJsonInput(opts.quickReplies, '--quick-replies');
 
       if (!message.text && !message.attachment) {
         throw new Error('Either --text or --attachment is required');
@@ -66,7 +67,7 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
         message: JSON.stringify({
           attachment: {
             type: 'template',
-            payload: JSON.parse(opts.template),
+            payload: parseJsonInput(opts.template, '--template'),
           },
         }),
         messaging_type: 'RESPONSE',

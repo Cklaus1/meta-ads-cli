@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { parseJsonInput } from '../json-input.js';
 
 export function registerAdsLibraryCommands(program: Command, getClient: () => MetaClient): void {
   const library = program.command('library').description('Meta Ads Library search and analysis');
@@ -79,7 +80,7 @@ export function registerAdsLibraryCommands(program: Command, getClient: () => Me
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       const client = getClient();
-      const brands = JSON.parse(opts.brands) as Array<{ query: string; page_id?: string }>;
+      const brands = parseJsonInput(opts.brands, '--brands') as Array<{ query: string; page_id?: string }>;
       const results: unknown[] = [];
 
       for (const brand of brands) {

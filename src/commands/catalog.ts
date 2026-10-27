@@ -2,6 +2,9 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { parseJsonInput } from '../json-input.js';
+import { deriveMetrics, PERFORMANCE_FIELDS } from '../metrics.js';
+import { insightsTimeParams } from '../time-range.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -40,6 +43,54 @@ export function parsePrice(input: string, defaultCurrency = 'USD'): { amount: nu
     throw new Error(`Unknown currency "${currency}" in price "${input}"`);
   }
   return { amount: Math.round(Number(num) * 10 ** digits), currency };
+}
+
+/**
+ * Sum ad-level insights rows (broken down by product_id) per product and join
+ * them to catalog products. Meta's product_id breakdown value may carry the
+ * retailer ID followed by the product name, so it's matched against both the
+ * catalog's product ID and retailer_id.
+ */
+export function summarizeProductPerformance(
+  rows: Array<Record<string, unknown>>,
+  products: Array<Record<string, string>>,
+  resultEvent: string,
+): Array<Record<string, unknown>> {
+  const byKey = new Map<string, Record<string, string>>();
+  for (const p of products) {
+    if (p.id) byKey.set(String(p.id), p);
+    if (p.retailer_id) byKey.set(String(p.retailer_id), p);
+  }
+  const totals = new Map<string, { spend: number; impressions: number; clicks: number; results: number; revenue: number }>();
+  for (const row of rows) {
+    const key = String(row.product_id ?? '').split(',')[0].trim();
+    if (!key) continue;
+    const m = deriveMetrics(row, resultEvent);
+    const t = totals.get(key) || { spend: 0, impressions: 0, clicks: 0, results: 0, revenue: 0 };
+    t.spend += m.spend;
+    t.impressions += m.impressions;
+    t.clicks += m.clicks;
+    t.results += m.results;
+    t.revenue += m.revenue;
+    totals.set(key, t);
+  }
+  return [...totals.entries()]
+    .map(([key, t]) => {
+      const product = byKey.get(key);
+      return {
+        product_id: key,
+        name: product?.name ?? null,
+        retailer_id: product?.retailer_id ?? null,
+        spend: Number(t.spend.toFixed(2)),
+        impressions: t.impressions,
+        clicks: t.clicks,
+        results: t.results,
+        cost_per_result: t.results > 0 ? Number((t.spend / t.results).toFixed(2)) : null,
+        revenue: Number(t.revenue.toFixed(2)),
+        roas: t.spend > 0 && t.revenue > 0 ? Number((t.revenue / t.spend).toFixed(2)) : null,
+      };
+    })
+    .sort((a, b) => b.spend - a.spend);
 }
 
 export function registerCatalogCommands(program: Command, getClient: () => MetaClient): void {
@@ -379,85 +430,115 @@ export function registerCatalogCommands(program: Command, getClient: () => MetaC
 
   catalog
     .command('collection-ad')
-    .description('Create a collection ad with multiple products')
+    .description('Create a collection ad: a cover image or video that opens an Instant Experience (canvas) with your products. Build the Instant Experience first (Ads Manager, or a template there) and pass its ID')
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
-    .requiredOption('--campaign-id <id>', 'Campaign ID')
     .requiredOption('--adset-id <id>', 'Ad set ID')
     .requiredOption('--page-id <id>', 'Facebook Page ID')
-    .requiredOption('--product-set-id <id>', 'Product set ID')
+    .requiredOption('--canvas-id <id>', 'Instant Experience (canvas) ID the ad opens')
+    .option('--image-hash <hash>', 'Cover image hash')
+    .option('--video-id <id>', 'Cover video ID (instead of an image)')
+    .option('--message <text>', 'Ad body text')
+    .option('--headline <text>', 'Headline')
+    .option('--collection-thumbnails <json>', 'collection_thumbnails: canvas element IDs and crops for the product tiles (JSON, @file or -)')
     .option('--name <name>', 'Ad name', 'Collection Ad')
-    .option('--headline <text>', 'Collection headline')
-    .option('--cta <type>', 'Call to action', 'SHOP_NOW')
+    .option('--status <status>', 'Ad status', 'PAUSED')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
+      if (!!opts.imageHash === !!opts.videoId) throw new Error('Give exactly one of --image-hash or --video-id for the cover');
       const client = getClient();
+      const canvasUrl = `https://fb.com/canvas_doc/${opts.canvasId}`;
 
-      // Create collection creative
-      const creativeBody: Record<string, string> = {
-        name: `${opts.name} - Creative`,
-        object_story_spec: JSON.stringify({
-          page_id: opts.pageId,
-          template_data: {
-            product_set_id: opts.productSetId,
-            call_to_action: { type: opts.cta },
-            name: opts.headline || '',
-          },
-        }),
-      };
+      // Collection ads link the cover to the Instant Experience's canvas_doc URL.
+      const storySpec: Record<string, unknown> = { page_id: opts.pageId };
+      if (opts.imageHash) {
+        storySpec.link_data = {
+          link: canvasUrl,
+          image_hash: opts.imageHash,
+          ...(opts.message ? { message: opts.message } : {}),
+          ...(opts.headline ? { name: opts.headline } : {}),
+          ...(opts.collectionThumbnails ? { collection_thumbnails: parseJsonInput(opts.collectionThumbnails, '--collection-thumbnails') } : {}),
+        };
+      } else {
+        storySpec.video_data = {
+          video_id: opts.videoId,
+          call_to_action: { type: 'LEARN_MORE', value: { link: canvasUrl } },
+          ...(opts.message ? { message: opts.message } : {}),
+          ...(opts.headline ? { title: opts.headline } : {}),
+          ...(opts.collectionThumbnails ? { collection_thumbnails: parseJsonInput(opts.collectionThumbnails, '--collection-thumbnails') } : {}),
+        };
+      }
 
       const creativeResponse = await client.request(`${opts.accountId}/adcreatives`, {
         method: 'POST',
-        body: creativeBody,
+        body: { name: `${opts.name} - Creative`, object_story_spec: JSON.stringify(storySpec) },
       });
       const creativeId = (creativeResponse.data as Record<string, unknown>).id as string;
 
-      // Create ad
-      const adBody: Record<string, string> = {
-        name: opts.name,
-        adset_id: opts.adsetId,
-        creative: JSON.stringify({ creative_id: creativeId }),
-        status: 'PAUSED',
-      };
-
       const adResponse = await client.request(`${opts.accountId}/ads`, {
         method: 'POST',
-        body: adBody,
+        body: {
+          name: opts.name,
+          adset_id: opts.adsetId,
+          creative: JSON.stringify({ creative_id: creativeId }),
+          status: opts.status,
+        },
       });
 
       console.log(formatOutput({
         creative: creativeResponse.data,
         ad: adResponse.data,
+        canvas_url: canvasUrl,
       }, opts.output as OutputFormat));
     }));
 
   catalog
     .command('product-performance <catalogId>')
-    .description('Get performance metrics for products in a catalog')
-    .option('--date-start <date>', 'Start date (YYYY-MM-DD)')
-    .option('--date-end <date>', 'End date (YYYY-MM-DD)')
-    .option('--limit <n>', 'Max products', '25')
+    .description('Per-product spend, results, revenue and ROAS for catalog ads (insights broken down by product_id), joined to catalog product names')
+    .option('--object-id <id>', 'Ad account (act_XXX), campaign or ad set to report on', getDefaultAccountId())
+    .option('--time-range <range>', 'Named range: today, yesterday, last_7d, last_30d, last_90d, this_month, last_month, maximum', 'last_30d')
+    .option('--since <date>', 'Start date YYYY-MM-DD (with --until)')
+    .option('--until <date>', 'End date YYYY-MM-DD (with --since)')
+    .option('--result-event <event>', 'Conversion counted as a result (purchase, add_to_cart, ...)', 'purchase')
+    .option('--limit <n>', 'Max products in the output', '25')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (catalogId: string, opts) => {
+      if (!opts.objectId) throw new Error('--object-id required (ad account, campaign or ad set running catalog ads)');
       const client = getClient();
-      const params: Record<string, string> = {
-        fields: 'id,name,price,currency,availability,image_url',
-        limit: opts.limit,
-      };
+      const insights = await client.requestAllPages(`${opts.objectId}/insights`, {
+        params: {
+          level: 'ad',
+          breakdowns: 'product_id',
+          fields: PERFORMANCE_FIELDS,
+          ...insightsTimeParams(opts.timeRange, opts.since, opts.until),
+        },
+      });
+      const rows = ((insights.data as { data?: Array<Record<string, unknown>> }).data) || [];
+      const products = await client.requestAllPages(`${catalogId}/products`, {
+        params: { fields: 'id,retailer_id,name,price,availability', limit: '500' },
+      });
+      const productRows = ((products.data as { data?: Array<Record<string, string>> }).data) || [];
+      const performance = summarizeProductPerformance(rows, productRows, opts.resultEvent);
+      console.log(formatOutput(performance.slice(0, Number(opts.limit) || 25), opts.output as OutputFormat));
+    }));
 
-      // Get products
-      const productsResponse = await client.request(`${catalogId}/products`, { params });
-
-      // Get catalog-level insights if available
-      const insightParams: Record<string, string> = {
-        fields: 'id,name,product_count',
-      };
-      const catalogResponse = await client.request(catalogId, { params: insightParams });
-
-      console.log(formatOutput({
-        catalog: catalogResponse.data,
-        products: productsResponse.data,
-      }, opts.output as OutputFormat));
+  catalog
+    .command('diagnostics <catalogId>')
+    .description('Catalog health: feed errors, missing attributes, event-source (pixel match) issues and policy problems')
+    .option('--types <types>', 'Comma-separated: ATTRIBUTES_INVALID, ATTRIBUTES_MISSING, EVENT_SOURCE_ISSUES, IMAGE_QUALITY, POLICY_VIOLATION, ...')
+    .option('--severities <list>', 'MUST_FIX and/or OPPORTUNITY')
+    .option('--affected-channels <list>', 'e.g. da (dynamic ads), shops, ig_product_tagging')
+    .option('--affected-entities <list>', 'product_item, product_catalog, product_set, product_event')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (catalogId: string, opts) => {
+      const params: Record<string, string> = {};
+      const list = (v?: string) => JSON.stringify(String(v).split(',').map(x => x.trim()).filter(Boolean));
+      if (opts.types) params.types = list(opts.types.toUpperCase());
+      if (opts.severities) params.severities = list(opts.severities.toUpperCase());
+      if (opts.affectedChannels) params.affected_channels = list(opts.affectedChannels);
+      if (opts.affectedEntities) params.affected_entities = list(opts.affectedEntities);
+      const response = await getClient().request(`${catalogId}/diagnostics`, { params });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
   // ── Catalog Batch API ─────────────────────────────────

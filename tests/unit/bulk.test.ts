@@ -13,7 +13,7 @@ describe('parseIntOption', () => {
 });
 
 describe('bulk create-campaigns', () => {
-  const config = JSON.stringify([{ name: 'a' }, { name: 'b' }]);
+  const config = JSON.stringify([{ name: 'a', objective: 'OUTCOME_SALES' }, { name: 'b', objective: 'OUTCOME_SALES' }]);
 
   it.each(['0', 'abc'])('--batch-size %s exits with a validation error and makes no requests', async (size) => {
     const { client, request } = mockClient(async () => ({ data: { id: '1' }, status: 200 }));

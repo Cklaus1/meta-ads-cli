@@ -2,6 +2,9 @@ import { AuthManager } from './auth.js';
 import { detectMimeType } from './mime.js';
 import logger from './logger.js';
 import { parseCents, validateEndpoint } from './validate.js';
+import { MetaApiError, NetworkError, PolicyError, UsageError } from './errors.js';
+import { loadPolicy, type Policy } from './policy.js';
+import { appendJournal, journalEnabled, newJournalId, redact } from './journal.js';
 
 const MAX_RETRIES = 3;
 const MAX_PAGES = 100;
@@ -28,6 +31,37 @@ export interface MetaRequestOptions {
   accessToken?: string;
   /** Override the API base URL (e.g. THREADS_BASE_URL). */
   baseUrl?: string;
+  /**
+   * Ask Meta to validate this write without applying it
+   * (execution_options=["validate_only"]). Also set for every write by --validate.
+   */
+  validateOnly?: boolean;
+}
+
+/** Client-wide modes and guardrails beyond the positional constructor args. */
+export interface ClientOptions {
+  /** --plan: run reads for real, but record writes instead of sending them. */
+  plan?: boolean;
+  /** --validate: send writes with validate_only so nothing changes. */
+  validateOnly?: boolean;
+  /** --verbose: print request/response timing to stderr. */
+  verbose?: boolean;
+  /** Overrides from flags for the policy's blockGoingLive/blockDeletes/blockMessaging. */
+  allowLive?: boolean;
+  allowDelete?: boolean;
+  allowMessaging?: boolean;
+  /** Policy to enforce; defaults to the policy file. */
+  policy?: Policy;
+}
+
+/** A write recorded (not sent) in --plan mode. */
+export interface PlannedWrite {
+  step: number;
+  method: string;
+  endpoint: string;
+  params?: Record<string, string>;
+  body?: Record<string, string>;
+  file?: string;
 }
 
 export interface MetaResponse {
@@ -103,6 +137,12 @@ const BUDGET_FIELDS = [
 /** Methods that are safe to retry after a 5xx or network error. */
 const IDEMPOTENT_METHODS = new Set(['GET', 'DELETE']);
 
+const STATUS_FIELDS = ['status', 'status_option', 'configured_status'] as const;
+// Edges whose POST sends a message to a person.
+const MESSAGING_EDGES = new Set(['messages', 'private_replies']);
+// Edges whose POST creates an object that can deliver (and spend) once ACTIVE.
+const DELIVERING_CREATE_EDGES = new Set(['campaigns', 'adsets', 'ads', 'copies']);
+
 export class MetaClient {
   private auth: AuthManager;
   private dryRun: boolean;
@@ -113,18 +153,28 @@ export class MetaClient {
   private maxSpendCapCents: number;
   /** Most recent usage reading, for proactive throttling between calls. */
   private lastUsage: UsageSnapshot = { peakPct: 0, detail: '' };
+  /** Raw rate-limit headers from the latest response (for `meta-ads limits`). */
+  private lastUsageHeaders: Record<string, unknown> = {};
   private warnedVersion = false;
+  private options: ClientOptions;
+  private policy: Policy;
+  private planned: PlannedWrite[] = [];
+  /** Cache of object id → ad account (act_XXX), or null for non-ad objects. */
+  private accountOf = new Map<string, string | null>();
 
-  constructor(auth: AuthManager, dryRun = false, apiVersion?: string, readOnly = false, maxSpendCapCents = 0) {
+  constructor(auth: AuthManager, dryRun = false, apiVersion?: string, readOnly = false, maxSpendCapCents = 0, options: ClientOptions = {}) {
     this.auth = auth;
     this.dryRun = dryRun;
-    this.readOnly = readOnly;
+    this.options = options;
+    this.policy = options.policy ?? loadPolicy().policy;
+    this.readOnly = readOnly || Boolean(this.policy.readOnly);
     this.apiVersion = apiVersion || process.env.META_ADS_CLI_API_VERSION || API_VERSION;
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
-    // The strictest configured cap wins: a flag can lower the env/profile cap
-    // but never raise it.
+    // The strictest configured cap wins: a flag can lower the env/profile/policy
+    // cap but never raise it.
     const envCap = parseCents(process.env.META_ADS_CLI_MAX_SPEND_CAP, 'META_ADS_CLI_MAX_SPEND_CAP');
-    const caps = [maxSpendCapCents, envCap].filter((c): c is number => c !== undefined && c > 0);
+    const caps = [maxSpendCapCents, envCap, this.policy.maxSpendCapCents]
+      .filter((c): c is number => c !== undefined && c > 0);
     this.maxSpendCapCents = caps.length ? Math.min(...caps) : 0;
   }
 
@@ -142,11 +192,11 @@ export class MetaClient {
       if (field === 'budget_value' && fields.budget_value_type === 'MULTIPLIER') continue;
       const str = String(raw).trim();
       if (!/^\d+(\.\d+)?$/.test(str)) {
-        throw new Error(`Spend-cap guard: ${field}="${raw}" is not a number of cents, so it can't be checked against the cap.`);
+        throw new PolicyError(`Spend-cap guard: ${field}="${raw}" is not a number of cents, so it can't be checked against the cap.`);
       }
       const cents = Number(str);
       if (cents > this.maxSpendCapCents) {
-        throw new Error(
+        throw new PolicyError(
           `Spend-cap guard: ${field}=${cents}¢ ($${(cents / 100).toFixed(2)}) exceeds the `
           + `spend cap of ${this.maxSpendCapCents}¢ ($${(this.maxSpendCapCents / 100).toFixed(2)}). `
           + 'Lower the budget, or ask the account owner to change the cap.',
@@ -157,7 +207,154 @@ export class MetaClient {
 
   private assertWritable(method: string): void {
     if (this.readOnly && method !== 'GET') {
-      throw new Error(`Read-only mode: ${method} requests are blocked. Remove --read-only to allow writes.`);
+      const why = this.policy.readOnly ? 'the policy file sets readOnly' : 'Remove --read-only to allow writes';
+      throw new PolicyError(`Read-only mode: ${method} requests are blocked (${why}).`);
+    }
+  }
+
+  /** The policy in effect (from the policy file). */
+  getPolicy(): Policy {
+    return this.policy;
+  }
+
+  /** Writes recorded so far in --plan mode. */
+  getPlan(): PlannedWrite[] {
+    return this.planned;
+  }
+
+  isPlanMode(): boolean {
+    return Boolean(this.options.plan);
+  }
+
+  /** Raw rate-limit headers from the latest response. */
+  getUsageHeaders(): Record<string, unknown> {
+    return this.lastUsageHeaders;
+  }
+
+  private checkAccountAllowed(account: string, endpoint: string): void {
+    const list = this.policy.accountAllowlist;
+    if (list && list.length && !list.includes(account)) {
+      throw new PolicyError(`Policy: account ${account} is not in the policy's accountAllowlist (request to ${endpoint}).`);
+    }
+  }
+
+  /** Ad account an object belongs to, looked up once (null for objects that aren't in an ad account). */
+  private async lookupAccount(objectId: string): Promise<string | null> {
+    if (/^act_\d+$/.test(objectId)) return objectId;
+    if (this.accountOf.has(objectId)) return this.accountOf.get(objectId)!;
+    let account: string | null = null;
+    try {
+      const res = await this.execute(objectId, 'GET', { params: { fields: 'account_id' } });
+      const id = (res.data as { account_id?: string }).account_id;
+      account = id ? (String(id).startsWith('act_') ? String(id) : `act_${id}`) : null;
+    } catch {
+      account = null; // Pages, posts, catalogs etc. have no account_id.
+    }
+    this.accountOf.set(objectId, account);
+    return account;
+  }
+
+  /**
+   * Enforce the policy file on a write: account allowlist, going live,
+   * deletes, messaging, and the account-wide daily budget ceiling.
+   */
+  private async enforcePolicy(endpoint: string, method: string, fields: Record<string, string>): Promise<void> {
+    const p = this.policy;
+    const segments = endpoint.split('/');
+    const target = segments[0];
+    const edge = segments.length > 1 ? segments[segments.length - 1] : undefined;
+    const isBareObject = segments.length === 1;
+
+    if (p.blockDeletes && !this.options.allowDelete) {
+      const deleting = method === 'DELETE' || STATUS_FIELDS.some(f => fields[f] === 'DELETED' || fields[f] === 'ARCHIVED');
+      if (deleting) {
+        throw new PolicyError(`Policy: deletes and archives are blocked (${method} ${endpoint}). Pass --allow-delete to confirm.`);
+      }
+    }
+
+    if (p.blockMessaging && !this.options.allowMessaging && method === 'POST' && edge && MESSAGING_EDGES.has(edge)) {
+      throw new PolicyError(`Policy: sending messages is blocked (${endpoint}). Pass --allow-messaging to confirm.`);
+    }
+
+    const setsActive = STATUS_FIELDS.some(f => fields[f] === 'ACTIVE');
+    const createsDelivering = method === 'POST' && edge !== undefined && DELIVERING_CREATE_EDGES.has(edge);
+    const statusGiven = STATUS_FIELDS.some(f => fields[f] !== undefined);
+    if (p.blockGoingLive && !this.options.allowLive) {
+      if (setsActive) {
+        throw new PolicyError(`Policy: setting objects ACTIVE is blocked (${endpoint}). Pass --allow-live to confirm going live.`);
+      }
+      if (createsDelivering && !statusGiven) {
+        throw new PolicyError(
+          `Policy: ${endpoint} has no explicit status, so it may be created ACTIVE. `
+          + 'Set the status to PAUSED, or pass --allow-live.',
+        );
+      }
+    }
+
+    const needsAccount = (p.accountAllowlist && p.accountAllowlist.length > 0) || p.maxAccountDailyBudgetCents;
+    if (!needsAccount) return;
+    if (this.dryRun) {
+      if (!/^act_\d+$/.test(target)) {
+        console.error('[dry-run] Policy account checks need a lookup and were skipped.');
+      }
+      if (p.maxAccountDailyBudgetCents) console.error('[dry-run] Policy account daily budget check was skipped.');
+      if (/^act_\d+$/.test(target)) this.checkAccountAllowed(target, endpoint);
+      return;
+    }
+
+    const account = await this.lookupAccount(target);
+    if (account) this.checkAccountAllowed(account, endpoint);
+
+    if (p.maxAccountDailyBudgetCents) {
+      await this.enforceAccountDailyBudget({
+        account, endpoint, isBareObject, objectId: isBareObject ? target : undefined,
+        fields, setsActive, createsDelivering, statusGiven,
+      });
+    }
+  }
+
+  private async enforceAccountDailyBudget(o: {
+    account: string | null; endpoint: string; isBareObject: boolean; objectId?: string;
+    fields: Record<string, string>; setsActive: boolean; createsDelivering: boolean; statusGiven: boolean;
+  }): Promise<void> {
+    const cap = this.policy.maxAccountDailyBudgetCents!;
+    const changesBudget = o.fields.daily_budget !== undefined;
+    if (!changesBudget && !o.setsActive) return;
+
+    let current: { daily_budget?: string; effective_status?: string } = {};
+    if (o.objectId) {
+      try {
+        const res = await this.execute(o.objectId, 'GET', { params: { fields: 'daily_budget,effective_status' } });
+        current = res.data as typeof current;
+      } catch {
+        current = {};
+      }
+    }
+    const endsActive = o.setsActive
+      || (o.isBareObject && !o.statusGiven && current.effective_status === 'ACTIVE')
+      || (o.createsDelivering && !o.statusGiven);
+    if (!endsActive) return;
+    const newBudget = Number(o.fields.daily_budget ?? current.daily_budget ?? 0);
+    if (!newBudget) return;
+    if (!o.account) {
+      throw new PolicyError(`Policy: can't tell which ad account ${o.endpoint} belongs to, so the account daily budget ceiling can't be checked.`);
+    }
+
+    let total = 0;
+    for (const edge of ['campaigns', 'adsets']) {
+      const res = await this.requestAllPages(`${o.account}/${edge}`, {
+        params: { fields: 'id,daily_budget', effective_status: '["ACTIVE"]', limit: '500' },
+      });
+      for (const item of ((res.data as { data?: Array<{ id: string; daily_budget?: string }> }).data || [])) {
+        if (item.id === o.objectId) continue;
+        total += Number(item.daily_budget || 0);
+      }
+    }
+    if (total + newBudget > cap) {
+      throw new PolicyError(
+        `Policy: active daily budgets in ${o.account} would total ${total + newBudget}¢ `
+        + `($${((total + newBudget) / 100).toFixed(2)}), over the account ceiling of ${cap}¢ ($${(cap / 100).toFixed(2)}).`,
+      );
     }
   }
 
@@ -213,26 +410,97 @@ export class MetaClient {
   async request(endpoint: string, options: MetaRequestOptions = {}): Promise<MetaResponse> {
     const method = options.method || 'GET';
     const baseUrl = options.baseUrl || this.baseUrl;
-    validateEndpoint(endpoint);
+    try {
+      validateEndpoint(endpoint);
+    } catch (err) {
+      throw new UsageError((err as Error).message);
+    }
+
+    const first = endpoint.split('/')[0];
+    if (/^act_\d+$/.test(first)) this.checkAccountAllowed(first, endpoint);
+    if (method === 'GET') {
+      if (this.dryRun) return this.printDryRun(method, endpoint, options, baseUrl);
+      return this.execute(endpoint, method, options);
+    }
 
     this.assertWritable(method);
-
     // Budget guard: validate before dry-run too, so the limit is caught while
     // previewing. Graph API reads query params on writes too, so check both.
-    if (method !== 'GET') {
-      this.enforceSpendCap(options.body);
-      this.enforceSpendCap(options.params);
+    this.enforceSpendCap(options.body);
+    this.enforceSpendCap(options.params);
+    const fields = { ...(options.params || {}), ...(options.body || {}) };
+    await this.enforcePolicy(endpoint, method, fields);
+
+    if (this.dryRun) return this.printDryRun(method, endpoint, options, baseUrl);
+
+    if (this.options.plan) {
+      const step = this.planned.length + 1;
+      this.planned.push({ step, method, endpoint, params: redact(options.params), body: redact(options.body) });
+      console.error(`[plan] ${step}. ${method} ${endpoint}${options.body ? ` ${JSON.stringify(redact(options.body))}` : ''}`);
+      // A placeholder id lets later steps of a workflow reference this object.
+      return { data: { planned: true, id: `planned-${step}`, method, endpoint }, status: 0 };
     }
 
-    if (this.dryRun) {
-      const url = this.buildUrl(endpoint, options.params, baseUrl);
-      console.log(`[dry-run] ${method} ${url}`);
-      if (options.body) {
-        console.log(`[dry-run] Body: ${JSON.stringify(options.body)}`);
+    const validateOnly = Boolean(options.validateOnly || this.options.validateOnly);
+    if (validateOnly) {
+      if (method !== 'POST') {
+        console.error(`[validate] ${method} ${endpoint} skipped (Meta can only validate POST requests).`);
+        return { data: { validated: false, skipped: true, method, endpoint }, status: 0 };
       }
-      return { data: { dryRun: true, method, endpoint }, status: 0 };
+      const res = await this.execute(endpoint, method, {
+        ...options,
+        body: { ...(options.body || {}), execution_options: '["validate_only"]' },
+      });
+      console.error(`[validate] ${method} ${endpoint}: valid`);
+      return { data: { validated: true, method, endpoint, response: res.data }, status: res.status };
     }
 
+    if (!journalEnabled()) return this.execute(endpoint, method, options);
+
+    // Journal the write, with the previous values of changed fields when the
+    // target is a single object we can read first.
+    let previous: Record<string, unknown> | undefined;
+    const changed = Object.keys(options.body || {}).filter(k => k !== 'execution_options');
+    if (method === 'POST' && !endpoint.includes('/') && changed.length) {
+      try {
+        const before = await this.execute(endpoint, 'GET', {
+          params: { fields: changed.join(',') }, accessToken: options.accessToken, baseUrl: options.baseUrl,
+        });
+        const data = before.data as Record<string, unknown>;
+        previous = Object.fromEntries(changed.filter(k => k in data).map(k => [k, data[k]]));
+      } catch {
+        previous = undefined; // Not every field is readable; the write still proceeds.
+      }
+    }
+    const entry = {
+      id: newJournalId(), ts: new Date().toISOString(), method, endpoint,
+      params: redact(options.params), body: redact(options.body), previous,
+    };
+    try {
+      const res = await this.execute(endpoint, method, options);
+      const d = res.data as Record<string, unknown>;
+      const resultId = d.id ?? d.copied_campaign_id ?? d.copied_adset_id ?? d.copied_ad_id;
+      appendJournal({ ...entry, status: 'ok', result_id: resultId !== undefined ? String(resultId) : undefined });
+      return res;
+    } catch (err) {
+      appendJournal({ ...entry, status: 'error', error: (err as Error).message });
+      throw err;
+    }
+  }
+
+  private printDryRun(method: string, endpoint: string, options: MetaRequestOptions, baseUrl: string): MetaResponse {
+    // Dry-run notes go to stderr so stdout carries only the command's result.
+    const url = this.buildUrl(endpoint, options.params, baseUrl);
+    console.error(`[dry-run] ${method} ${url}`);
+    if (options.body) {
+      console.error(`[dry-run] Body: ${JSON.stringify(options.body)}`);
+    }
+    return { data: { dryRun: true, method, endpoint }, status: 0 };
+  }
+
+  /** Send a request (with retries and error mapping), bypassing modes and policy. */
+  private async execute(endpoint: string, method: string, options: MetaRequestOptions): Promise<MetaResponse> {
+    const baseUrl = options.baseUrl || this.baseUrl;
     const token = options.accessToken || await this.auth.getToken();
 
     // Build params with access_token
@@ -261,6 +529,8 @@ export class MetaClient {
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       let response: Response;
+      const started = Date.now();
+      if (this.options.verbose) console.error(`→ ${method} ${endpoint}${attempt ? ` (retry ${attempt})` : ''}`);
 
       try {
         if (method === 'GET' || method === 'DELETE') {
@@ -293,6 +563,10 @@ export class MetaClient {
       }
 
       logger.debug(`Response: ${response.status} ${response.statusText}`, { attempt });
+      const traceHeader = response.headers?.get?.('x-fb-trace-id') || undefined;
+      if (this.options.verbose) {
+        console.error(`← ${response.status} ${method} ${endpoint} in ${Date.now() - started}ms${traceHeader ? ` (fbtrace_id ${traceHeader})` : ''}`);
+      }
 
       // Meta sets this when it auto-upgraded the call from an expired version.
       const versionWarning = response.headers?.get?.('x-ad-api-version-warning');
@@ -303,6 +577,7 @@ export class MetaClient {
 
       // Record usage from this response for the next call's proactive throttle.
       this.lastUsage = parseUsageHeaders(response.headers);
+      this.lastUsageHeaders = readUsageHeaders(response.headers);
       if (this.lastUsage.peakPct > 0) {
         logger.debug(`Rate-limit usage: ${this.lastUsage.detail} (${this.lastUsage.peakPct}%)`);
       }
@@ -334,7 +609,9 @@ export class MetaClient {
         json = JSON.parse(text);
       } catch {
         if (!response.ok) {
-          throw new Error(`Meta API error (${response.status}): ${text}`);
+          throw new MetaApiError(`Meta API error (${response.status}): ${text}`, {
+            httpStatus: response.status, fbtraceId: traceHeader, retryable: response.status >= 500,
+          });
         }
         return { data: { rawResponse: text }, status: response.status };
       }
@@ -352,6 +629,14 @@ export class MetaClient {
           : text;
         const errorCode = Number(errorObj?.code);
         const errorSubcode = Number(errorObj?.error_subcode);
+        const details = {
+          httpStatus: response.status,
+          code: Number.isFinite(errorCode) ? errorCode : undefined,
+          subcode: Number.isFinite(errorSubcode) ? errorSubcode : undefined,
+          fbtraceId: (errorObj?.fbtrace_id as string | undefined) || traceHeader,
+          userTitle: errorObj?.error_user_title as string | undefined,
+          userMessage: errorObj?.error_user_msg as string | undefined,
+        };
 
         // Ads/app rate limiting arrives as HTTP 400/403 with a specific error
         // code — NOT 429. Honor Meta's own recovery estimate when present,
@@ -369,23 +654,25 @@ export class MetaClient {
           }
           // Recovery window exceeds what we'll auto-wait — surface it clearly.
           const est = this.lastUsage.estimatedRecoverSec;
-          throw new Error(
+          throw new MetaApiError(
             `Meta rate limit reached (code ${errorCode}). `
             + (est ? `Meta estimates ~${Math.round(est / 60)} minute(s) to regain access. ` : '')
             + 'Slow down with --page-delay, or raise META_ADS_CLI_MAX_WAIT_MS to auto-wait longer.',
+            { ...details, type: 'rate_limit', retryable: true },
           );
         }
 
         logger.error(`API error ${response.status}: ${errorMessage}`);
 
         if (response.status === 401 || errorCode === 190 || errorCode === 102) {
-          throw new Error(`Authentication failed. Run: meta-ads auth login`);
+          throw new MetaApiError('Authentication failed. Run: meta-ads auth login', { ...details, type: 'auth' });
         }
         if (response.status === 403 || errorCode === 200) {
-          throw new Error(`Permission denied: ${errorMessage}`);
+          throw new MetaApiError(`Permission denied: ${errorMessage}`, { ...details, type: 'permission' });
         }
-        void errorSubcode; // reserved for finer-grained handling
-        throw new Error(`Meta API error (${response.status}): ${errorMessage}`);
+        throw new MetaApiError(`Meta API error (${response.status}): ${errorMessage}`, {
+          ...details, retryable: response.status >= 500 || errorObj?.is_transient === true,
+        });
       }
 
       // Extract pagination cursor
@@ -397,7 +684,7 @@ export class MetaClient {
       return { data: json, status: response.status, nextCursor };
     }
 
-    throw lastError || new Error('Request failed after retries');
+    throw lastError || new MetaApiError('Request failed after retries', { httpStatus: 0, retryable: true });
   }
 
   async requestAllPages(
@@ -460,8 +747,14 @@ export class MetaClient {
     fields: Record<string, string> = {},
     options: Pick<MetaRequestOptions, 'accessToken'> = {},
   ): Promise<MetaResponse> {
-    validateEndpoint(endpoint);
+    try {
+      validateEndpoint(endpoint);
+    } catch (err) {
+      throw new UsageError((err as Error).message);
+    }
     this.assertWritable('POST');
+    this.enforceSpendCap(fields);
+    await this.enforcePolicy(endpoint, 'POST', fields);
 
     const fs = await import('fs');
     const stat = fs.statSync(filePath);
@@ -471,10 +764,20 @@ export class MetaClient {
     logger.info(`Uploading ${filePath} (${fileSize} bytes, ${contentType})`);
 
     if (this.dryRun) {
-      console.log(`[dry-run] POST ${this.baseUrl}/${endpoint}`);
-      console.log(`[dry-run] File: ${filePath} (${fileSize} bytes, ${contentType})`);
-      if (Object.keys(fields).length) console.log(`[dry-run] Fields: ${JSON.stringify(fields)}`);
+      console.error(`[dry-run] POST ${this.baseUrl}/${endpoint}`);
+      console.error(`[dry-run] File: ${filePath} (${fileSize} bytes, ${contentType})`);
+      if (Object.keys(fields).length) console.error(`[dry-run] Fields: ${JSON.stringify(fields)}`);
       return { data: { dryRun: true, method: 'POST', fileSize, contentType }, status: 0 };
+    }
+    if (this.options.plan) {
+      const step = this.planned.length + 1;
+      this.planned.push({ step, method: 'POST', endpoint, body: redact(fields), file: filePath });
+      console.error(`[plan] ${step}. POST ${endpoint} (upload ${filePath}, ${fileSize} bytes)`);
+      return { data: { planned: true, id: `planned-${step}`, method: 'POST', endpoint }, status: 0 };
+    }
+    if (this.options.validateOnly) {
+      console.error(`[validate] Upload to ${endpoint} skipped (uploads can't be validated without sending the file).`);
+      return { data: { validated: false, skipped: true, method: 'POST', endpoint }, status: 0 };
     }
 
     const token = options.accessToken || await this.auth.getToken();
@@ -501,29 +804,51 @@ export class MetaClient {
       throw networkError(err, UPLOAD_TIMEOUT_MS);
     }
 
+    const journalBase = {
+      id: newJournalId(), ts: new Date().toISOString(), method: 'POST', endpoint,
+      body: { ...redact(fields), source: filePath },
+    };
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Upload failed (${response.status}): ${errorText}`);
+      const err = new MetaApiError(`Upload failed (${response.status}): ${errorText}`, {
+        httpStatus: response.status, fbtraceId: response.headers?.get?.('x-fb-trace-id') || undefined,
+      });
+      appendJournal({ ...journalBase, status: 'error', error: err.message });
+      throw err;
     }
 
     const text = await response.text();
+    let data: Record<string, unknown>;
     try {
-      const json = JSON.parse(text);
-      return { data: json, status: response.status };
+      data = JSON.parse(text);
     } catch {
-      return { data: { message: 'Upload complete', size: fileSize }, status: response.status };
+      data = { message: 'Upload complete', size: fileSize };
     }
+    appendJournal({ ...journalBase, status: 'ok', result_id: data.id !== undefined ? String(data.id) : undefined });
+    return { data, status: response.status };
   }
 }
 
 /** Turn a fetch rejection (timeout, DNS, reset) into a readable error. */
-function networkError(err: unknown, timeoutMs: number): Error {
+function networkError(err: unknown, timeoutMs: number): NetworkError {
   const e = err as Error & { cause?: { code?: string } };
   if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
-    return new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    return new NetworkError(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
   }
   const code = e?.cause?.code ? ` (${e.cause.code})` : '';
-  return new Error(`Network error${code}: ${e?.message || String(err)}`);
+  return new NetworkError(`Network error${code}: ${e?.message || String(err)}`);
+}
+
+/** The raw rate-limit usage headers, parsed as JSON where possible. */
+function readUsageHeaders(headers: Headers | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!headers || typeof headers.get !== 'function') return out;
+  for (const h of ['x-app-usage', 'x-business-use-case-usage', 'x-ad-account-usage', 'x-fb-ads-insights-throttle']) {
+    const raw = headers.get(h);
+    if (!raw) continue;
+    try { out[h] = JSON.parse(raw); } catch { out[h] = raw; }
+  }
+  return out;
 }
 
 function sleep(ms: number): Promise<void> {

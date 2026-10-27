@@ -109,7 +109,7 @@ meta-ads auth login-link
 meta-ads auth refresh-token
 ```
 
-Token storage: OS keychain via `keytar`, fallback to `~/.config/meta-ads-cli/token-cache.json`.
+Token storage: OS keychain via `keytar` (an optional dependency), fallback to `~/.config/meta-ads-cli/token-cache.json` (mode 0600).
 
 ## Global Options
 
@@ -120,7 +120,45 @@ Token storage: OS keychain via `keytar`, fallback to `~/.config/meta-ads-cli/tok
 | `--max-spend-cap <cents>` | Block any write whose budget exceeds this ceiling (see [docs/SPENDING_CAPS.md](docs/SPENDING_CAPS.md)) |
 | `--api-version <version>` | Graph API version (default: `v26.0`) |
 | `--profile <name>` | Use a named profile for credentials and account |
+| `--plan` | Run real reads but hold back writes; prints the planned writes as JSON to stderr |
+| `--validate` | Send writes with Meta's `validate_only` option: checks them server-side without changing anything |
+| `--error-format json` | Print errors as JSON on stderr (also `META_ADS_CLI_ERROR_FORMAT=json`) |
+| `--verbose` | Log each request with timing and Meta's `fbtrace_id` to stderr |
+| `--allow-live` / `--allow-delete` / `--allow-messaging` | Confirm actions a [policy file](#safety-policy-and-change-journal) blocks by default |
 | `-V, --version` | Show CLI version |
+
+Results go to stdout; dry-run lines, warnings and errors go to stderr, so stdout can be piped to `jq`.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Generic failure (or a check that found problems, e.g. `preflight`, `accounts health`) |
+| 2 | Usage or validation error |
+| 3 | Authentication failed |
+| 4 | Permission denied |
+| 5 | Rate limited |
+| 6 | Other Meta API error |
+| 7 | Blocked by policy, spend cap or read-only mode |
+| 8 | Network error or timeout |
+
+### Safety policy and change journal
+
+A policy file (`~/.config/meta-ads-cli/policy.json`, or `META_ADS_CLI_POLICY_FILE`) applies to every command:
+
+```json
+{
+  "accountAllowlist": ["act_123"],
+  "maxSpendCapCents": 10000,
+  "maxAccountDailyBudgetCents": 50000,
+  "blockGoingLive": true,
+  "blockDeletes": true,
+  "blockMessaging": true
+}
+```
+
+For delegated or agent access, make it owned by root and read-only so the agent can't edit it. `meta-ads policy show` prints the active policy. Every write is logged to `~/.config/meta-ads-cli/journal.jsonl`; `meta-ads journal list` shows it and `meta-ads journal undo <id>` restores the previous values of an update.
 
 For limiting spend risk with delegated or automated (agent) access, see
 **[docs/SPENDING_CAPS.md](docs/SPENDING_CAPS.md)**.
@@ -223,6 +261,28 @@ meta-ads insights get 12345 -o csv > report.csv
 |---------|-------------|-------------|
 | `reach-frequency` | predict, get, list, reserve, cancel | Reserved buying & media planning |
 | `branded-content` | eligible-sponsors, approve-creator, revoke-creator, boost-post, search-creators | Influencer partnerships |
+
+### Planning, Automation & Experiments
+
+| Command | Subcommands | Description |
+|---------|-------------|-------------|
+| `plan` / `apply` | `<spec.json\|yaml>` | Launch a campaign → ad sets → creatives → ads from a spec file; idempotent by name, PAUSED unless `--activate` |
+| `rules` | list, get, create, update, enable, disable, delete, history, preset | Meta automated rules (server-side, run every 30 min) |
+| `experiments` | create, list, get, results | Meta split tests and lift studies (Ad Studies API) |
+| `campaigns preflight` | `<id>` | "Will this deliver?" check across account, campaign, ad sets and ads |
+| `accounts` | health, spend, set-spend-cap, rollup | Account blockers, spend pacing, account spend cap, cross-account totals |
+| `monitor watch` | `--interval 15m --notify slack:<url>` | Scheduled checks with Slack/webhook alerts |
+| `journal` / `policy` / `limits` | | Change log with undo, active safety policy, rate-limit usage |
+
+### Agents & Tooling
+
+| Command | Description |
+|---------|-------------|
+| `schema --cli` | Every command, argument and option as JSON (generated from the CLI itself) |
+| `mcp [--tools "campaigns_*"]` | Run as an MCP server over stdio, one tool per command. Global flags such as `--read-only` and `--profile` apply to every call |
+| `completion bash\|zsh\|fish` | Shell completion script |
+
+Any option that takes JSON also accepts `@path/to/file.json` or `-` for stdin.
 
 ### Webhooks
 

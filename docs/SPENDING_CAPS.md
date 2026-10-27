@@ -143,7 +143,7 @@ On a real test account, set a hard account cap so campaigns auto-pause when tota
 spend hits it:
 
 ```bash
-meta-ads accounts ... # set spend_cap (in cents) on the account
+meta-ads accounts set-spend-cap act_XXX --cents <amount> # set spend_cap (in cents) on the account
 ```
 
 ⚠️ **Meta rate-limits spend-cap changes to 10 per day** — set it once and leave it.

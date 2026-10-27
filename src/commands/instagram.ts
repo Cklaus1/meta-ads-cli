@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { parseJsonInput } from '../json-input.js';
 import { resolveTimeRange } from '../time-range.js';
 
 function getDefaultAccountId(): string {
@@ -207,7 +208,7 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (instagramId: string, opts) => {
       const client = getClient();
-      const items = JSON.parse(opts.items) as Array<Record<string, string>>;
+      const items = parseJsonInput(opts.items, '--items') as Array<Record<string, string>>;
 
       if (items.length < 2 || items.length > 10) {
         throw new Error('Carousel requires 2-10 items');

@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.0 — 2026-10-27
+
+Implements the gaps in [docs/PRODUCT_GAPS.md](docs/PRODUCT_GAPS.md) and [docs/MEDIA_BUYER_GAPS.md](docs/MEDIA_BUYER_GAPS.md), except the npm name and licence (owner decisions).
+
+### Breaking changes
+
+- `--dry-run` output moved to stderr; stdout carries only the result.
+- Exit codes are now meaningful (2 usage, 3 auth, 4 permission, 5 rate limit, 6 API, 7 policy, 8 network) instead of always 1.
+- `monitor auto-pause` and `monitor check` default to `last_7d` with volume floors, and skip ad sets in learning.
+- `insights get` defaults its level to `campaign` for account IDs, and to the object's own level otherwise.
+- `workflow launch-campaign` derives the optimization goal from the objective, requires `--countries` or `--targeting`, and requires a pixel for Sales.
+- `bulk create-campaigns` requires `objective` in every config.
+- `bidding validate` exits 1 when it finds errors. `TARGET_COST` is rejected everywhere.
+- Significant ad set or campaign budget edits while learning need `--force`.
+- `campaigns create --cbo` no longer sends a field; the campaign budget is the Advantage+ campaign budget.
+- `leads webhooks` takes `--app-id`, `--page-id` and `--verify-token`, and makes the two subscription calls Meta needs.
+- `catalog collection-ad` requires `--canvas-id`.
+- `audiences overlap` reports estimated pairwise overlap, not the union.
+- `funnel` retargeting stages exclude deeper stages unless `--allow-overlap`.
+
+### Agents and governance
+
+- `--error-format json`, `--plan` (real reads, writes held back), `--validate` (Meta `validate_only`), `--verbose`.
+- Safety policy file: account allowlist, going-live/delete/messaging blocks, account daily budget cap. `policy show`.
+- Write journal with `journal list` and `journal undo`.
+- `schema --cli`, an MCP server mode (`meta-ads mcp`), and `completion bash|zsh|fish`.
+- JSON options accept `@file` and `-` (stdin).
+- Default profile (`profile use`), profile secrets in the keychain, profile tags, `limits`, `doctor --sandbox`.
+- CI on Node 18/20/22. `keytar` is optional.
+- The CLI no longer crashes with EPIPE when its output is piped into `head`.
+
+### Media buying
+
+- Shared metrics: each conversion is counted once, results follow the objective, and revenue, cost per result and ROAS come from `action_values`.
+- Insights: `--with-derived`, `--compare-previous`, `--time-increment`, `--action-breakdowns`, `--filtering`, `--sort` and `--since/--until`. Named ranges use Meta's account-timezone presets. Also `attribution-audit` and `export-mmm`.
+- Budget and bid optimizers, `ai score`, `ai recommendations`, fatigue and trends judge on cost per result or ROAS, with volume floors, learning awareness and capped changes.
+- `bidding learning-phase` reads `learning_stage_info`. Other new bidding commands: `pacing`, `cpm-benchmark`, objective/goal/billing/promoted-object validation, and ROAS goal (`bid_constraints`).
+- `plan`/`apply` launch specs, `campaigns preflight`, Advantage+ state, special-ad-category checks.
+- Ad sets: `--roas-goal`, `--cost-cap`, `--bid-cap`, targeting helpers, frequency caps only where allowed, DSA defaults, brand safety, placement soft opt-out, creative audience pairing, `--with-insights` on lists.
+- Ads: `ads disapproved`, `ads request-review`. Bulk: `bulk export`, `bulk import` with a diff, `bulk update`, resumable state. `targeting validate`.
+- Audiences: customer-list upload and removal (hashed, batched), value-based and tiered lookalikes, labels, saved audiences.
+- Conversions API: `event_id`/`order_id` dedup, Limited Data Use, `conversions quality` (Event Match Quality).
+- Leads: CRM conversion-lead events (`leads crm-event`), incremental export, `webhooks listen` with lead streaming.
+- `experiments` (Meta split tests and lift studies). `ab-test analyze` uses a significance test.
+- `rules` (Meta automated rules) and `monitor watch` with Slack/webhook alerts.
+- Creatives: Advantage+ enhancements opt-in/out, dynamic creative / flexible format, previews, ads from existing posts, image/video library, `bulk-create --folder`.
+- Accounts: `health`, `spend` (pacing), `set-spend-cap`, `rollup`.
+- Catalog: real `product-performance`, `diagnostics`.
+
 ## 0.3.0 — 2026-10-27
 
 Fixes everything in [docs/BUG_SPEC.md](docs/BUG_SPEC.md), from a full source review.

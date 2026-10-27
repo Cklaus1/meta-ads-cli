@@ -37,7 +37,8 @@ describe('adsets update placements (BUG-16)', () => {
     client.request.mockResolvedValueOnce({ data: { targeting: { geo_locations: { countries: ['US'] } } }, status: 200 });
     await run(registerAdSetCommands, client, ['adsets', 'update', '123', '--facebook-positions', 'feed']);
     expect(client.request.mock.calls[0]).toEqual(['123', { params: { fields: 'targeting' } }]);
-    const post = client.request.mock.calls[1][1];
+    // A second GET checks the learning phase (targeting changes are significant edits); the POST comes last.
+    const post = client.request.mock.calls.find(([, o]) => o?.method === 'POST')![1];
     expect(JSON.parse(post.body.targeting)).toEqual({ geo_locations: { countries: ['US'] }, facebook_positions: ['feed'] });
   });
 });

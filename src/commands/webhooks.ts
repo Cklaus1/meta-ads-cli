@@ -1,7 +1,109 @@
 import { Command } from 'commander';
+import crypto from 'crypto';
+import fs from 'fs';
+import http from 'http';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
+import { LEAD_FIELDS, pivotLeads } from './leads.js';
+
+/** Check Meta's X-Hub-Signature-256 header (HMAC-SHA256 of the raw body with the app secret). */
+export function verifySignature(rawBody: Buffer, header: string | undefined, appSecret: string): boolean {
+  if (!header || !header.startsWith('sha256=')) return false;
+  const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
+  const given = header.slice('sha256='.length);
+  return given.length === expected.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+}
+
+/** Leadgen IDs (and page/form IDs) from a webhook payload. */
+export function extractLeadgenEvents(payload: unknown): Array<{ leadgenId: string; pageId?: string; formId?: string }> {
+  const out: Array<{ leadgenId: string; pageId?: string; formId?: string }> = [];
+  const entries = ((payload as Record<string, unknown>)?.entry ?? []) as Array<Record<string, unknown>>;
+  for (const entry of entries) {
+    for (const change of ((entry.changes ?? []) as Array<Record<string, any>>)) {
+      if (change.field === 'leadgen' && change.value?.leadgen_id) {
+        out.push({ leadgenId: String(change.value.leadgen_id), pageId: change.value.page_id, formId: change.value.form_id });
+      }
+    }
+  }
+  return out;
+}
+
+/** Append one lead row to a CSV, writing the header first if the file is new. */
+export function appendLeadCsv(file: string, lead: Record<string, unknown>): void {
+  const row = pivotLeads([lead])[0];
+  if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
+    fs.writeFileSync(file, formatOutput([row], 'csv') + '\n');
+    return;
+  }
+  // Keep the existing column order; answers to fields not in the header are dropped.
+  const header = fs.readFileSync(file, 'utf8').split(/\r?\n/, 1)[0].split(',').map(h => h.replace(/^"|"$/g, ''));
+  const missing = Object.keys(row).filter(k => !header.includes(k));
+  if (missing.length) console.error(`Warning: lead ${row.id} has fields not in ${file}'s header, skipped: ${missing.join(', ')}`);
+  const ordered: Record<string, unknown> = {};
+  for (const h of header) ordered[h] = row[h] ?? '';
+  const csv = formatOutput([ordered], 'csv');
+  fs.appendFileSync(file, csv.slice(csv.indexOf('\n') + 1) + '\n');
+}
+
+export interface WebhookListenerOptions {
+  verifyToken: string;
+  appSecret?: string;
+  /** Called with each verified event payload. */
+  onEvent: (payload: unknown) => void | Promise<void>;
+}
+
+/**
+ * HTTP handler for Meta webhooks: answers the GET verification handshake and
+ * accepts POSTed events only with a valid X-Hub-Signature-256.
+ */
+export function createWebhookHandler(o: WebhookListenerOptions): http.RequestListener {
+  return (req, res) => {
+    const url = new URL(req.url || '/', 'http://localhost');
+    if (req.method === 'GET') {
+      if (url.searchParams.get('hub.mode') === 'subscribe' && url.searchParams.get('hub.verify_token') === o.verifyToken) {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end(url.searchParams.get('hub.challenge') || '');
+      } else {
+        res.writeHead(403);
+        res.end('Forbidden');
+      }
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405);
+      res.end();
+      return;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > 5 * 1024 * 1024) req.destroy();
+      else chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      if (o.appSecret && !verifySignature(raw, req.headers['x-hub-signature-256'] as string | undefined, o.appSecret)) {
+        res.writeHead(401);
+        res.end('Invalid signature');
+        return;
+      }
+      let payload: unknown;
+      try {
+        payload = JSON.parse(raw.toString('utf8'));
+      } catch {
+        res.writeHead(400);
+        res.end('Invalid JSON');
+        return;
+      }
+      // Acknowledge right away; Meta retries slow or failed deliveries.
+      res.writeHead(200);
+      res.end('OK');
+      Promise.resolve(o.onEvent(payload)).catch(err => console.error(`Error handling webhook event: ${(err as Error).message}`));
+    });
+  };
+}
 
 export function registerWebhookCommands(program: Command, getClient: () => MetaClient): void {
   const wh = program.command('webhooks').description('Webhook subscriptions for real-time notifications');
@@ -79,5 +181,67 @@ export function registerWebhookCommands(program: Command, getClient: () => MetaC
       const accessToken = await client.getPageToken(pageId);
       const response = await client.request(`${pageId}/subscribed_apps`, { method: 'DELETE', accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  wh
+    .command('listen')
+    .description('Run a webhook receiver: answers Meta\'s verification handshake, checks signatures, prints events as JSON lines, and can stream new leads')
+    .requiredOption('--verify-token <token>', 'The verify token you set on the subscription (webhooks subscribe --verify-token)')
+    .option('--port <port>', 'Port to listen on', '8080')
+    .option('--host <host>', 'Interface to bind', '0.0.0.0')
+    .option('--app-secret <secret>', 'App secret for X-Hub-Signature-256 checks (default: META_ADS_CLI_APP_SECRET)')
+    .option('--insecure-no-signature', 'Accept unsigned events (testing only)')
+    .option('--leads-csv <file>', 'For leadgen events, fetch each lead and append it to this CSV')
+    .option('--forward-url <url>', 'For leadgen events, POST each fetched lead as JSON to this URL (e.g. a CRM or Zapier hook)')
+    .action(handleErrors(async (opts) => {
+      const appSecret = opts.appSecret || process.env.META_ADS_CLI_APP_SECRET || process.env.META_APP_SECRET;
+      if (!appSecret && !opts.insecureNoSignature) {
+        throw new Error('An app secret is needed to verify event signatures. Pass --app-secret or set META_ADS_CLI_APP_SECRET (or --insecure-no-signature for local testing).');
+      }
+      const port = Number(opts.port);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port must be a valid port number');
+      const streamLeads = Boolean(opts.leadsCsv || opts.forwardUrl);
+      const client = streamLeads ? getClient() : undefined;
+
+      const handleLead = async (leadgenId: string) => {
+        const response = await client!.request(leadgenId, { params: { fields: LEAD_FIELDS } });
+        const lead = response.data as Record<string, unknown>;
+        if (opts.leadsCsv) appendLeadCsv(opts.leadsCsv, lead);
+        if (opts.forwardUrl) {
+          const r = await fetch(opts.forwardUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(pivotLeads([lead])[0]),
+            signal: AbortSignal.timeout(30_000),
+          });
+          if (!r.ok) console.error(`Forwarding lead ${leadgenId} failed: HTTP ${r.status}`);
+        }
+        console.error(`Lead ${leadgenId} saved`);
+      };
+
+      const server = http.createServer(createWebhookHandler({
+        verifyToken: opts.verifyToken,
+        appSecret: opts.insecureNoSignature ? undefined : appSecret,
+        onEvent: async (payload) => {
+          console.log(JSON.stringify(payload));
+          if (!streamLeads) return;
+          for (const ev of extractLeadgenEvents(payload)) {
+            try {
+              await handleLead(ev.leadgenId);
+            } catch (err) {
+              console.error(`Could not fetch lead ${ev.leadgenId}: ${(err as Error).message}`);
+            }
+          }
+        },
+      }));
+      await new Promise<void>((resolve, reject) => {
+        server.on('error', reject);
+        server.listen(port, opts.host, () => {
+          console.error(`Listening for Meta webhooks on http://${opts.host}:${port} (Ctrl+C to stop). Expose it over HTTPS (e.g. a tunnel) and use that URL as the callback.`);
+          resolve();
+        });
+      });
+      // Keep running until interrupted.
+      await new Promise<void>(resolve => process.once('SIGINT', () => { server.close(); resolve(); }));
     }));
 }

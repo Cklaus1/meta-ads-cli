@@ -7,6 +7,35 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/**
+ * Turn curve_budget_reach into rows. Meta returns parallel arrays (budget,
+ * reach, impression, ...) for the curve's points; an array of point objects is
+ * also accepted. Budget is in the account's minor currency unit (cents).
+ */
+export function curveRows(curve: unknown): Array<Record<string, number | null>> {
+  if (!curve) return [];
+  const asRow = (budget: unknown, reach: unknown, impressions: unknown) => {
+    const b = Number(budget), r = Number(reach), i = Number(impressions);
+    return {
+      budget: Number.isFinite(b) ? b : null,
+      reach: Number.isFinite(r) ? r : null,
+      impressions: Number.isFinite(i) ? i : null,
+      frequency: Number.isFinite(r) && r > 0 && Number.isFinite(i) ? Number((i / r).toFixed(2)) : null,
+    };
+  };
+  if (Array.isArray(curve)) {
+    return curve.map(p => {
+      const o = p as Record<string, unknown>;
+      return asRow(o.budget, o.reach, o.impression ?? o.impressions);
+    });
+  }
+  const c = curve as Record<string, unknown>;
+  const budgets = Array.isArray(c.budget) ? c.budget : [];
+  const reach = Array.isArray(c.reach) ? c.reach : [];
+  const impressions = Array.isArray(c.impression) ? c.impression : Array.isArray(c.impressions) ? c.impressions : [];
+  return budgets.map((b, idx) => asRow(b, reach[idx], impressions[idx]));
+}
+
 export function registerReachFrequencyCommands(program: Command, getClient: () => MetaClient): void {
   const rf = program.command('reach-frequency').alias('rf').description('Reach & Frequency: reserved buying and media planning');
 
@@ -45,12 +74,22 @@ export function registerReachFrequencyCommands(program: Command, getClient: () =
   rf
     .command('get <predictionId>')
     .description('Get a reach & frequency prediction result')
+    .option('--curve', 'Print the budget → reach curve as rows (budget, reach, impressions, frequency)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (predictionId: string, opts) => {
       const client = getClient();
       const response = await client.request(predictionId, {
         params: { fields: 'id,status,prediction_progress,curve_budget_reach,external_reach,external_budget,external_impression,frequency_cap,target_spec,time_created' },
       });
+      if (opts.curve) {
+        const data = response.data as Record<string, unknown>;
+        const rows = curveRows(data.curve_budget_reach);
+        if (rows.length === 0 && !data.dryRun) {
+          throw new Error(`No curve in this prediction yet (status ${data.status ?? 'unknown'}, progress ${data.prediction_progress ?? '?'}%).`);
+        }
+        console.log(formatOutput(rows, opts.output as OutputFormat));
+        return;
+      }
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 

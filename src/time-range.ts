@@ -44,3 +44,23 @@ export function resolveTimeRange(timeRange: string): string | undefined {
   }
   return JSON.stringify(resolver());
 }
+
+/**
+ * Insights time params for a named range or explicit dates. Named ranges go
+ * to Meta as date_preset, which Meta resolves in the ad account's timezone
+ * (the local clock may be a different day). Explicit --since/--until win.
+ */
+export function insightsTimeParams(range?: string, since?: string, until?: string): Record<string, string> {
+  if (since || until) {
+    if (!since || !until) throw new Error('--since and --until must be used together (YYYY-MM-DD)');
+    for (const d of [since, until]) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) throw new Error(`Invalid date "${d}". Use YYYY-MM-DD.`);
+    }
+    return { time_range: JSON.stringify({ since, until }) };
+  }
+  if (!range) return {};
+  if (!(TIME_RANGES as readonly string[]).includes(range)) {
+    throw new Error(`Unknown time range "${range}". Use one of: ${TIME_RANGES.join(', ')}`);
+  }
+  return { date_preset: range };
+}

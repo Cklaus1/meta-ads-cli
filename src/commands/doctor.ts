@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import fs from 'fs';
 import path from 'path';
 import { CONFIG_DIR } from '../private-file.js';
+import { loadPolicy, policyWritableByCurrentUser } from '../policy.js';
 import { AuthManager } from '../auth.js';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
@@ -87,6 +88,7 @@ export function registerDoctorCommand(
     .command('doctor')
     .description('Preflight check: token validity, scopes, API version, deprecations, and LLM config')
     .option('--account-id <id>', 'Ad account ID to test access against (act_XXX)', process.env.META_ADS_CLI_ACCOUNT_ID)
+    .option('--sandbox', 'Check that --account-id looks like a Meta sandbox (unfunded, no delivery) account, with setup guidance')
     .option('-o, --output <format>', 'Output format', 'text')
     .action(handleErrors(async (opts) => {
       const checks: Check[] = [];
@@ -273,6 +275,66 @@ export function registerDoctorCommand(
 
       // ── 6a. Credential file permissions ───────────────────────────────────
       for (const check of credentialPermissionChecks()) checks.push(check);
+
+      // ── 6a2. Policy file ──────────────────────────────────────────────────
+      {
+        const loaded = loadPolicy();
+        if (!loaded.exists) {
+          checks.push({
+            name: 'Policy file',
+            status: 'info',
+            detail: 'No policy file — no account allowlist, going-live, delete or messaging guards.',
+            fix: `For delegated/agent access, create ${loaded.path || '~/.config/meta-ads-cli/policy.json'} (see "meta-ads policy show").`,
+          });
+        } else {
+          const writable = policyWritableByCurrentUser(loaded.path);
+          checks.push({
+            name: 'Policy file',
+            status: writable ? 'warn' : 'ok',
+            detail: `${loaded.path}: ${Object.keys(loaded.policy).join(', ') || 'empty'}${writable ? ' — editable by the current user' : ' — read-only for this user'}.`,
+            fix: writable ? 'Have another user (e.g. root) own the policy file and make it read-only, so an agent can\'t loosen it.' : undefined,
+          });
+        }
+      }
+
+      // ── 6a3. Sandbox account (--sandbox) ──────────────────────────────────
+      if (opts.sandbox) {
+        if (!opts.accountId) {
+          checks.push({
+            name: 'Sandbox account',
+            status: 'fail',
+            detail: 'Pass --account-id with your sandbox ad account.',
+            fix: 'Create one in the App Dashboard: Marketing API → Tools → Sandbox Mode (one per app). Ads in it never deliver or spend.',
+          });
+        } else if (tokenValid) {
+          try {
+            const resp = await getClient().request(`${opts.accountId}`, {
+              params: { fields: 'name,account_status,funding_source,amount_spent,currency' },
+            });
+            const acct = resp.data as { name?: string; funding_source?: string; amount_spent?: string; account_status?: number };
+            // Meta exposes no "is sandbox" field; sandbox accounts have no
+            // funding source and never spend, so use that as the signal.
+            const looksSandbox = !acct.funding_source && Number(acct.amount_spent || 0) === 0;
+            checks.push({
+              name: 'Sandbox account',
+              status: looksSandbox ? 'ok' : 'warn',
+              detail: looksSandbox
+                ? `${opts.accountId} (${acct.name ?? 'unnamed'}) has no funding source and no spend, as a sandbox account should.`
+                : `${opts.accountId} has a funding source or past spend, so it is probably a real account — ads created here can spend money.`,
+              fix: looksSandbox
+                ? 'Pin agents to it with a policy file: {"accountAllowlist": ["' + opts.accountId + '"]}. Use --validate to check writes against Meta without creating anything.'
+                : 'Use the sandbox account from App Dashboard → Marketing API → Tools → Sandbox Mode for testing, or keep everything PAUSED with a policy that sets blockGoingLive.',
+            });
+          } catch (err) {
+            checks.push({
+              name: 'Sandbox account',
+              status: 'fail',
+              detail: `Cannot read ${opts.accountId}: ${(err as Error).message}`,
+              fix: 'In the App Dashboard, link the sandbox account to your app (Marketing API → Settings) and use a token from the same app.',
+            });
+          }
+        }
+      }
 
       // ── 6b. Safety guards (spend cap) ──────────────────────────────────────
       {

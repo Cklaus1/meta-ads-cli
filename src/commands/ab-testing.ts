@@ -3,7 +3,9 @@ import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { assertCopyableCampaign } from './campaigns.js';
 import { handleErrors } from '../errors.js';
-import { resolveTimeRange } from '../time-range.js';
+import { insightsTimeParams } from '../time-range.js';
+import { compareProportions, deriveMetrics, resultEventFor, PERFORMANCE_FIELDS, type DerivedMetrics } from '../metrics.js';
+import { buildStudyBody, toUnix } from './experiments.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -29,6 +31,50 @@ export function planBudgetSplit(original: Record<string, unknown>, split: number
   return { field, control, variant: total - control };
 }
 
+/**
+ * Compare two arms on their objective's result. The rate is results per link
+ * click when there are clicks (conversion rate), otherwise per impression.
+ * A winner is only declared when the difference is statistically significant
+ * and both arms have enough results; cost per result and ROAS are reported but
+ * not tested.
+ */
+export function compareArms(a: DerivedMetrics, b: DerivedMetrics, opts: { alpha?: number; minResults?: number } = {}): Record<string, unknown> {
+  const alpha = opts.alpha ?? 0.05;
+  const minResults = opts.minResults ?? 30;
+  const useClicks = a.clicks > 0 && b.clicks > 0 && a.result_event !== 'link_click' && a.result_event !== 'reach';
+  const denomA = useClicks ? a.clicks : a.impressions;
+  const denomB = useClicks ? b.clicks : b.impressions;
+  const rateA = denomA > 0 ? a.results / denomA : 0;
+  const rateB = denomB > 0 ? b.results / denomB : 0;
+  const { z, pValue } = compareProportions(a.results, denomA, b.results, denomB);
+  const enough = a.results >= minResults && b.results >= minResults;
+  let winner: string;
+  let verdict: string;
+  if (!enough) {
+    winner = 'none';
+    verdict = `Not enough data: each arm needs at least ${minResults} ${a.result_event} results (A has ${a.results}, B has ${b.results}).`;
+  } else if (pValue >= alpha) {
+    winner = 'none';
+    verdict = `No significant difference in ${a.result_event} rate (p=${pValue.toFixed(3)} ≥ ${alpha}).`;
+  } else {
+    winner = rateA > rateB ? 'A' : 'B';
+    verdict = `${winner} has a significantly higher ${a.result_event} rate (p=${pValue.toFixed(3)}).`;
+  }
+  const round = (v: number | null, d = 4) => (v === null ? null : Number(v.toFixed(d)));
+  return {
+    result_event: a.result_event,
+    rate_basis: useClicks ? 'results per link click' : 'results per impression',
+    a: { results: a.results, rate: round(rateA), cost_per_result: round(a.cost_per_result, 2), roas: round(a.roas, 2), spend: a.spend },
+    b: { results: b.results, rate: round(rateB), cost_per_result: round(b.cost_per_result, 2), roas: round(b.roas, 2), spend: b.spend },
+    z: round(z, 3),
+    p_value: round(pValue),
+    alpha,
+    winner,
+    verdict,
+    caveat: 'Two separately running campaigns compete in the same auction and reach overlapping people, so this comparison is indicative only. Use `meta-ads experiments create --type SPLIT_TEST` for a clean test.',
+  };
+}
+
 function copiedId(data: unknown): string | undefined {
   const d = data as Record<string, unknown>;
   return (d?.copied_campaign_id || d?.id) as string | undefined;
@@ -47,6 +93,8 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
     .option('--budget-split <ratio>', 'Budget split for variant A (0.0-1.0)', '0.5')
     .option('--variant-bid-amount <cents>', 'Bid amount for variant B')
     .option('--duration-days <days>', 'Test duration in days', '14')
+    .option('--business-id <id>', 'Business ID: also create a Meta split test (Ad Studies) over the two copies so they don\'t compete in the same auction (env META_ADS_CLI_BUSINESS_ID)', process.env.META_ADS_CLI_BUSINESS_ID || '')
+    .option('--start <time>', 'Split test start: "now", Unix timestamp or ISO date', 'now')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required');
@@ -100,8 +148,29 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
         await client.request(variantId, { method: 'POST', body: updateBody });
       }
 
+      // A real split test divides the audience between the copies; without
+      // it they compete in the same auction and the comparison is unreliable.
+      let study: unknown = null;
+      if (opts.businessId && controlId && variantId) {
+        const start = toUnix(opts.start, '--start');
+        const days = Number(opts.durationDays);
+        const controlPct = Math.round(split * 100);
+        const studyBody = buildStudyBody({
+          name: opts.name,
+          type: 'SPLIT_TEST',
+          start,
+          end: start + Math.round((Number.isFinite(days) && days > 0 ? days : 14) * 86400),
+          cells: [
+            { name: `${opts.name} - Control`, treatment_percentage: controlPct, campaigns: [controlId] },
+            { name: `${opts.name} - Variant B`, treatment_percentage: 100 - controlPct, campaigns: [variantId] },
+          ],
+        });
+        study = (await client.request(`${opts.businessId}/ad_studies`, { method: 'POST', body: studyBody })).data;
+      }
+
       console.log(formatOutput({
         test_name: opts.name,
+        split_test: study,
         control: controlResponse.data,
         variant: variantCopyResponse.data,
         budget_split: {
@@ -110,55 +179,56 @@ export function registerAbTestingCommands(program: Command, getClient: () => Met
           variant: `${plan.variant}¢ (${Math.round((1 - split) * 100)}%)`,
         },
         duration_days: parseInt(opts.durationDays),
-        note: 'Both campaigns created as PAUSED. Activate both when ready to start the test, and pause the original campaign so it does not keep spending alongside them.',
+        note: study
+          ? 'Both campaigns created as PAUSED and enrolled in a Meta split test. Activate both when ready, and pause the original campaign so it does not keep spending alongside them.'
+          : 'Both campaigns created as PAUSED. Without --business-id they are NOT a real split test: they compete in the same auction and reach overlapping people. Pass --business-id (or use `meta-ads experiments create`) for a proper test. Pause the original campaign so it does not keep spending alongside them.',
       }, opts.output as OutputFormat));
     }));
 
   abtest
     .command('analyze <campaignIdA> <campaignIdB>')
-    .description('Analyze A/B test results by comparing two campaigns')
-    .option('--time-range <range>', 'Time range for comparison', 'last_7d')
-    .option('--metrics <fields>', 'Metrics to compare', 'impressions,clicks,spend,cpc,cpm,ctr,conversions,cost_per_action_type')
+    .description('Compare two campaigns on their objective\'s result (conversion rate with a significance test, cost per result, ROAS). For split tests created with experiments, prefer `meta-ads experiments results`')
+    .option('--time-range <range>', 'Named range: today, yesterday, last_7d, last_30d, last_90d, this_month, last_month, maximum', 'last_7d')
+    .option('--since <date>', 'Start date YYYY-MM-DD (with --until)')
+    .option('--until <date>', 'End date YYYY-MM-DD (with --since)')
+    .option('--result-event <event>', 'Override the result event (purchase, lead, link_click, ...); default comes from the campaign objective')
+    .option('--alpha <p>', 'Significance threshold', '0.05')
+    .option('--min-results <n>', 'Minimum results per arm before declaring a winner', '30')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (campaignIdA: string, campaignIdB: string, opts) => {
       const client = getClient();
-      const insightFields = opts.metrics;
+      const insightParams: Record<string, string> = {
+        fields: PERFORMANCE_FIELDS,
+        ...insightsTimeParams(opts.timeRange, opts.since, opts.until),
+      };
 
-      const insightParams: Record<string, string> = { fields: insightFields };
-      const resolved = resolveTimeRange(opts.timeRange);
-      if (resolved) insightParams.time_range = resolved;
-
-      const [insightsA, insightsB] = await Promise.all([
+      const [insightsA, insightsB, campaignA, campaignB] = await Promise.all([
         client.request(`${campaignIdA}/insights`, { params: insightParams }),
         client.request(`${campaignIdB}/insights`, { params: insightParams }),
+        client.request(campaignIdA, { params: { fields: 'id,name,objective,bid_strategy,daily_budget,status' } }),
+        client.request(campaignIdB, { params: { fields: 'id,name,objective,bid_strategy,daily_budget,status' } }),
       ]);
 
-      const [campaignA, campaignB] = await Promise.all([
-        client.request(campaignIdA, { params: { fields: 'id,name,bid_strategy,daily_budget,status' } }),
-        client.request(campaignIdB, { params: { fields: 'id,name,bid_strategy,daily_budget,status' } }),
-      ]);
-
-      const dataA = ((insightsA.data as Record<string, unknown>).data as unknown[])?.[0] as Record<string, unknown> || {};
-      const dataB = ((insightsB.data as Record<string, unknown>).data as unknown[])?.[0] as Record<string, unknown> || {};
-
-      // Calculate winner for key metrics
-      const comparison: Record<string, unknown> = {};
-      for (const metric of ['cpc', 'cpm', 'ctr', 'spend']) {
-        const valA = parseFloat(String(dataA[metric] || 0));
-        const valB = parseFloat(String(dataB[metric] || 0));
-        const lowerIsBetter = metric !== 'ctr';
-        const winner = lowerIsBetter
-          ? (valA < valB ? 'A' : valA > valB ? 'B' : 'tie')
-          : (valA > valB ? 'A' : valA < valB ? 'B' : 'tie');
-        comparison[metric] = { a: valA, b: valB, winner, diff_pct: valA ? ((valB - valA) / valA * 100).toFixed(1) + '%' : 'N/A' };
+      const rowOf = (r: { data: unknown }) => (((r.data as { data?: Array<Record<string, unknown>> }).data) || [])[0] || {};
+      const objective = String((campaignA.data as Record<string, unknown>).objective || '');
+      const objectiveB = String((campaignB.data as Record<string, unknown>).objective || '');
+      const event = opts.resultEvent || resultEventFor({ objective });
+      const warnings: string[] = [];
+      if (objective && objectiveB && objective !== objectiveB) {
+        warnings.push(`The campaigns have different objectives (${objective} vs ${objectiveB}); comparing on ${event}.`);
       }
+
+      const comparison = compareArms(
+        deriveMetrics(rowOf(insightsA), event),
+        deriveMetrics(rowOf(insightsB), event),
+        { alpha: Number(opts.alpha), minResults: Number(opts.minResults) },
+      );
 
       console.log(formatOutput({
         campaign_a: campaignA.data,
         campaign_b: campaignB.data,
-        insights_a: dataA,
-        insights_b: dataB,
         comparison,
+        ...(warnings.length ? { warnings } : {}),
       }, opts.output as OutputFormat));
     }));
 }

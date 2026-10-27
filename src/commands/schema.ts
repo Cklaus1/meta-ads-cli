@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { handleErrors } from '../errors.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 
@@ -63,12 +63,112 @@ const ENDPOINTS: Record<string, Record<string, EndpointSchema>> = {
   },
 };
 
+export interface CliOptionSchema {
+  flags: string;
+  name: string;
+  description: string;
+  type: 'boolean' | 'string';
+  required: boolean;
+  default?: unknown;
+  choices?: string[];
+}
+
+export interface CliArgumentSchema {
+  name: string;
+  required: boolean;
+  variadic: boolean;
+  description: string;
+}
+
+export interface CliCommandSchema {
+  path: string[];
+  name: string;
+  description: string;
+  aliases: string[];
+  arguments: CliArgumentSchema[];
+  options: CliOptionSchema[];
+  subcommands: number;
+}
+
+/** Describe one Commander option in a stable, serialisable shape. */
+export function describeOption(o: Option): CliOptionSchema {
+  const schema: CliOptionSchema = {
+    flags: o.flags,
+    name: o.attributeName(),
+    description: o.description,
+    type: o.isBoolean() || o.negate ? 'boolean' : 'string',
+    required: Boolean(o.mandatory),
+  };
+  if (o.defaultValue !== undefined) schema.default = o.defaultValue;
+  if (o.argChoices) schema.choices = [...o.argChoices];
+  return schema;
+}
+
+/**
+ * Walk the live Commander tree and describe every command, so introspection,
+ * MCP tools, completion and skills always match what is registered.
+ */
+export function describeCommandTree(root: Command): CliCommandSchema[] {
+  const out: CliCommandSchema[] = [];
+  const walk = (cmd: Command, path: string[]) => {
+    for (const sub of cmd.commands) {
+      if ((sub as unknown as { _hidden?: boolean })._hidden) continue;
+      const subPath = [...path, sub.name()];
+      out.push({
+        path: subPath,
+        name: subPath.join(' '),
+        description: sub.description(),
+        aliases: sub.aliases(),
+        arguments: sub.registeredArguments.map(a => ({
+          name: a.name(),
+          required: a.required,
+          variadic: a.variadic,
+          description: a.description,
+        })),
+        options: sub.options.filter(o => !o.hidden).map(describeOption),
+        subcommands: sub.commands.length,
+      });
+      walk(sub, subPath);
+    }
+  };
+  walk(root, []);
+  return out;
+}
+
+/** Leaf commands only (the ones that run an action). */
+export function leafCommands(root: Command): CliCommandSchema[] {
+  return describeCommandTree(root).filter(c => c.subcommands === 0);
+}
+
 export function registerSchemaCommands(program: Command): void {
   program
     .command('schema [service] [operation]')
-    .description('Show API schema for services and operations')
+    .description('Describe the CLI (--cli: every command, argument and option) or the Graph API endpoints it calls (default / --api)')
+    .option('--cli', 'Describe CLI commands, arguments and options from the live command tree')
+    .option('--api', 'Describe Graph API endpoints (the default)')
     .option('-o, --output <format>', 'Output format', 'json')
-    .action(handleErrors(async (service: string | undefined, operation: string | undefined, opts: { output: string }) => {
+    .addHelpText('after', `
+Examples:
+  meta-ads schema --cli                      # every command with its flags
+  meta-ads schema --cli campaigns            # commands under "campaigns"
+  meta-ads schema --cli campaigns create     # one command
+  meta-ads schema campaigns create           # Graph API endpoint for campaigns create`)
+    .action(handleErrors(async (service: string | undefined, operation: string | undefined, opts: { output: string; cli?: boolean; api?: boolean }) => {
+      if (opts.cli) {
+        const prefix = [service, operation].filter((p): p is string => Boolean(p));
+        const commands = describeCommandTree(program)
+          .filter(c => prefix.every((p, i) => c.path[i] === p));
+        if (commands.length === 0) {
+          throw new Error(`Unknown command: ${prefix.join(' ')}. Run: meta-ads schema --cli`);
+        }
+        const globalOptions = program.options.filter(o => !o.hidden).map(describeOption);
+        const payload = prefix.length === 0
+          ? { name: program.name(), version: program.version(), global_options: globalOptions, commands }
+          : commands;
+        console.log(formatOutput(payload, opts.output as OutputFormat));
+        return;
+      }
+
       if (!service) {
         // List all services
         const services = Object.keys(ENDPOINTS).map(name => ({

@@ -39,22 +39,50 @@ import { registerWebhookCommands } from './commands/webhooks.js';
 import { registerSetupCommand } from './commands/setup.js';
 import { registerProfileCommands } from './commands/profile.js';
 import { registerDoctorCommand } from './commands/doctor.js';
-import { applyProfile } from './profiles.js';
+import { registerPolicyCommands } from './commands/policy.js';
+import { registerJournalCommands } from './commands/journal.js';
+import { registerLimitsCommand } from './commands/limits.js';
+import { registerMcpCommand } from './commands/mcp.js';
+import { registerCompletionCommand } from './commands/completion.js';
+import { registerExperimentCommands } from './commands/experiments.js';
+import { registerRuleCommands } from './commands/rules.js';
+import { registerPlanCommands } from './commands/plan.js';
+import { applyProfile, getDefaultProfileName } from './profiles.js';
 import { parseCents, validateAccountId } from './validate.js';
-import { API_VERSION } from './meta-client.js';
+import { API_VERSION, type ClientOptions } from './meta-client.js';
+import { CliError, ExitCode, UsageError, exitCodeFor, reportError, setErrorFormat } from './errors.js';
+import { loadPolicy } from './policy.js';
 import logger from './logger.js';
+
+// Exit quietly when the reader closes the pipe early (e.g. `meta-ads ... | head`).
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EPIPE') process.exit(0);
+    throw err;
+  });
+}
 
 const program = new Command();
 
 program
   .name('meta-ads')
   .description('Meta Ads CLI - Manage Facebook & Instagram advertising via the Graph API')
-  .version('0.3.0')
-  .option('--dry-run', 'Preview the API request without executing it')
+  .version('0.4.0')
+  .option('--dry-run', 'Preview the API request without executing it (no API calls at all)')
+  .option('--plan', 'Run reads for real but only record writes; prints the plan as JSON to stderr')
+  .option('--validate', 'Send writes with validate_only so Meta checks them without applying anything')
   .option('--read-only', 'Restrict to read-only operations (block POST/DELETE)')
   .option('--max-spend-cap <cents>', 'Block any write whose budget field (daily/lifetime/spend_cap/bid) exceeds this many cents')
+  .option('--allow-live', 'Confirm writes that set objects ACTIVE (when the policy blocks going live)')
+  .option('--allow-delete', 'Confirm deletes/archives (when the policy blocks deletes)')
+  .option('--allow-messaging', 'Confirm sending messages (when the policy blocks messaging)')
   .option('--api-version <version>', `Graph API version (default: ${API_VERSION})`)
-  .option('--profile <name>', 'Use a named profile for credentials and account');
+  .option('--profile <name>', 'Use a named profile for credentials and account')
+  .option('--error-format <format>', 'text (default) or json: errors as one JSON object on stderr')
+  .option('--verbose', 'Print each request with its status, timing and fbtrace_id to stderr')
+  // Usage errors (unknown option, missing argument) exit 2; must be set before
+  // subcommands are created so they inherit it.
+  .exitOverride();
 
 /**
  * Read a global option's value from argv before Commander parses it.
@@ -71,24 +99,13 @@ function readArgvOption(name: string): string | undefined {
   return undefined;
 }
 
-// Apply the profile before command registration, because option defaults
-// (e.g. --account-id) read the env vars it sets.
-const profileName = readArgvOption('--profile');
-if (profileName) {
-  try {
-    applyProfile(profileName);
-  } catch (err) {
-    console.error(`Error: ${(err as Error).message}`);
-    process.exit(1);
-  }
-}
-
 // Global flags are resolved from Commander in the preAction hook, before any
 // action can construct the client.
 let dryRun = false;
 let readOnly = false;
 let maxSpendCapCents = 0;
 let apiVersion = process.env.META_ADS_CLI_API_VERSION || API_VERSION;
+let clientOptions: ClientOptions = {};
 
 // Lazy-initialized singletons
 let authManager: AuthManager | null = null;
@@ -104,115 +121,182 @@ function getAuth(): AuthManager {
 function getClient(): MetaClient {
   if (!metaClient) {
     const auth = getAuth();
-    metaClient = new MetaClient(auth, dryRun, apiVersion, readOnly, maxSpendCapCents);
+    metaClient = new MetaClient(auth, dryRun, apiVersion, readOnly, maxSpendCapCents, clientOptions);
   }
   return metaClient;
 }
 
-// Register all command modules — Core CRUD
-registerAuthCommands(program, getAuth);
-registerAccountCommands(program, getClient);
-registerCampaignCommands(program, getClient);
-registerAdSetCommands(program, getClient);
-registerAdCommands(program, getClient);
-registerCreativeCommands(program, getClient);
-registerInsightCommands(program, getClient);
+function fail(err: unknown): never {
+  logger.error(err instanceof Error ? err.message : String(err));
+  reportError(err);
+  process.exit(exitCodeFor(err));
+}
 
-// Targeting & Audiences
-registerTargetingCommands(program, getClient);
-registerAudienceCommands(program, getClient);
-registerRetargetingCommands(program, getClient);
+async function main(): Promise<void> {
+  // Error format first, so even startup errors honour it.
+  setErrorFormat(readArgvOption('--error-format'));
 
-// Pages & Leads
-registerPageCommands(program, getClient);
-registerLeadCommands(program, getClient);
+  // A policy file that exists but is broken must stop the CLI rather than
+  // silently turning the guardrails off.
+  loadPolicy();
 
-// E-commerce & Instagram
-registerCatalogCommands(program, getClient);
-registerInstagramCommands(program, getClient);
-
-// Bidding & Budget
-registerBiddingCommands(program, getClient);
-
-// Operations
-registerDuplicationCommands(program, getClient);
-registerBulkCommands(program, getClient);
-registerBackupCommands(program, getClient);
-
-// Analytics & Intelligence
-registerAdsLibraryCommands(program, getClient);
-registerAnalyticsCommands(program, getClient);
-registerAiCommands(program, getClient);
-registerAbTestingCommands(program, getClient);
-
-// Conversion Tracking & Monitoring
-registerConversionCommands(program, getClient);
-registerMonitoringCommands(program, getClient);
-
-// Cross-service workflows
-registerWorkflowCommands(program, getClient);
-
-// Threads (content publishing & insights)
-registerThreadsCommands(program, getClient);
-
-// Business Management
-registerBusinessCommands(program, getClient);
-
-// Messaging platforms
-registerWhatsAppCommands(program, getClient);
-registerMessengerCommands(program, getClient);
-
-// Media planning & creator partnerships
-registerReachFrequencyCommands(program, getClient);
-registerBrandedContentCommands(program, getClient);
-
-// Webhooks
-registerWebhookCommands(program, getClient);
-
-// Profiles & Utilities
-registerProfileCommands(program);
-registerSchemaCommands(program);
-registerGenerateSkillsCommand(program);
-registerSetupCommand(program, getAuth);
-registerDoctorCommand(program, getAuth, getClient);
-
-// Ensure auth is initialized before non-auth commands
-program.hook('preAction', async (_root, actionCommand) => {
-  const globals = program.opts();
-  dryRun = Boolean(globals.dryRun);
-  readOnly = Boolean(globals.readOnly);
-  if (globals.apiVersion) apiVersion = globals.apiVersion;
-  maxSpendCapCents = parseCents(globals.maxSpendCap, '--max-spend-cap') ?? 0;
-
-  // Normalize --account-id to the act_ form and reject anything else, so a
-  // bad value can't be spliced into the request path.
-  const accountId = actionCommand.getOptionValue('accountId');
-  if (typeof accountId === 'string' && accountId) {
-    actionCommand.setOptionValue('accountId', validateAccountId(accountId));
+  // Apply the profile before command registration, because option defaults
+  // (e.g. --account-id) read the env vars it sets. The default profile only
+  // fills values not already set in the environment.
+  const profileName = readArgvOption('--profile');
+  if (profileName) {
+    await applyProfile(profileName);
+  } else {
+    const defaultProfile = getDefaultProfileName();
+    if (defaultProfile) await applyProfile(defaultProfile, { onlyUnset: true });
   }
 
-  // The hook is attached to the root program, so walk up from the command
-  // that is actually running.
-  const commandChain: string[] = [];
-  let cmd: Command | null = actionCommand;
-  while (cmd) {
-    commandChain.unshift(cmd.name());
-    cmd = cmd.parent;
+  // Register all command modules — Core CRUD
+  registerAuthCommands(program, getAuth);
+  registerAccountCommands(program, getClient);
+  registerCampaignCommands(program, getClient);
+  registerAdSetCommands(program, getClient);
+  registerAdCommands(program, getClient);
+  registerCreativeCommands(program, getClient);
+  registerInsightCommands(program, getClient);
+
+  // Targeting & Audiences
+  registerTargetingCommands(program, getClient);
+  registerAudienceCommands(program, getClient);
+  registerRetargetingCommands(program, getClient);
+
+  // Pages & Leads
+  registerPageCommands(program, getClient);
+  registerLeadCommands(program, getClient);
+
+  // E-commerce & Instagram
+  registerCatalogCommands(program, getClient);
+  registerInstagramCommands(program, getClient);
+
+  // Bidding & Budget
+  registerBiddingCommands(program, getClient);
+
+  // Operations
+  registerDuplicationCommands(program, getClient);
+  registerBulkCommands(program, getClient);
+  registerBackupCommands(program, getClient);
+
+  // Analytics & Intelligence
+  registerAdsLibraryCommands(program, getClient);
+  registerAnalyticsCommands(program, getClient);
+  registerAiCommands(program, getClient);
+  registerAbTestingCommands(program, getClient);
+
+  // Conversion Tracking & Monitoring
+  registerConversionCommands(program, getClient);
+  registerMonitoringCommands(program, getClient);
+
+  // Cross-service workflows
+  registerWorkflowCommands(program, getClient);
+
+  // Threads (content publishing & insights)
+  registerThreadsCommands(program, getClient);
+
+  // Business Management
+  registerBusinessCommands(program, getClient);
+
+  // Messaging platforms
+  registerWhatsAppCommands(program, getClient);
+  registerMessengerCommands(program, getClient);
+
+  // Media planning & creator partnerships
+  registerReachFrequencyCommands(program, getClient);
+  registerBrandedContentCommands(program, getClient);
+
+  // Webhooks
+  registerWebhookCommands(program, getClient);
+
+  // Profiles & Utilities
+  registerProfileCommands(program);
+  registerSchemaCommands(program);
+  registerGenerateSkillsCommand(program);
+  registerSetupCommand(program, getAuth);
+  registerDoctorCommand(program, getAuth, getClient);
+  registerPolicyCommands(program);
+  registerJournalCommands(program, getClient);
+  registerLimitsCommand(program, getClient);
+  registerExperimentCommands(program, getClient);
+  registerRuleCommands(program, getClient);
+  registerPlanCommands(program, getClient);
+  registerMcpCommand(program);
+  registerCompletionCommand(program);
+
+  // Ensure auth is initialized before non-auth commands
+  program.hook('preAction', async (_root, actionCommand) => {
+    const globals = program.opts();
+    dryRun = Boolean(globals.dryRun);
+    readOnly = Boolean(globals.readOnly);
+    if (globals.apiVersion) apiVersion = globals.apiVersion;
+    try {
+      maxSpendCapCents = parseCents(globals.maxSpendCap, '--max-spend-cap') ?? 0;
+    } catch (err) {
+      throw new UsageError((err as Error).message);
+    }
+    if (globals.plan && globals.dryRun) throw new UsageError('Use either --plan or --dry-run, not both');
+    clientOptions = {
+      plan: Boolean(globals.plan),
+      validateOnly: Boolean(globals.validate),
+      verbose: Boolean(globals.verbose),
+      allowLive: Boolean(globals.allowLive),
+      allowDelete: Boolean(globals.allowDelete),
+      allowMessaging: Boolean(globals.allowMessaging),
+    };
+
+    // Normalize --account-id to the act_ form and reject anything else, so a
+    // bad value can't be spliced into the request path.
+    const accountId = actionCommand.getOptionValue('accountId');
+    if (typeof accountId === 'string' && accountId) {
+      try {
+        actionCommand.setOptionValue('accountId', validateAccountId(accountId));
+      } catch (err) {
+        throw new UsageError((err as Error).message);
+      }
+    }
+
+    // The hook is attached to the root program, so walk up from the command
+    // that is actually running.
+    const commandChain: string[] = [];
+    let cmd: Command | null = actionCommand;
+    while (cmd) {
+      commandChain.unshift(cmd.name());
+      cmd = cmd.parent;
+    }
+
+    // Skip auth initialization for commands that don't need a token, and dry-run
+    const skipAuth = ['auth', 'setup', 'schema', 'generate-skills', 'profile', 'doctor', 'policy', 'journal', 'mcp', 'completion'];
+    if (skipAuth.includes(commandChain[1]) && commandChain.slice(1, 3).join(' ') !== 'journal undo') return;
+    if (dryRun) return;
+
+    logger.info(`Running: meta-ads ${commandChain.slice(1).join(' ')}`);
+
+    const auth = getAuth();
+    await auth.initialize();
+  });
+
+  // --plan: print the collected writes once the command finishes.
+  process.on('exit', () => {
+    if (clientOptions.plan && metaClient) {
+      const plan = metaClient.getPlan();
+      console.error(JSON.stringify({ plan: { writes: plan, count: plan.length } }, null, 2));
+    }
+  });
+
+  try {
+    await program.parseAsync(process.argv);
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (typeof code === 'string' && code.startsWith('commander.')) {
+      // Commander already printed its message (or the help/version text).
+      const helpOrVersion = code === 'commander.helpDisplayed' || code === 'commander.version' || code === 'commander.help';
+      process.exit(helpOrVersion ? (err as { exitCode?: number }).exitCode ?? 0 : ExitCode.USAGE);
+    }
+    throw err;
   }
+}
 
-  // Skip auth initialization for auth/setup/schema/generate-skills commands and dry-run
-  const skipAuth = ['auth', 'setup', 'schema', 'generate-skills', 'profile', 'doctor'];
-  if (skipAuth.includes(commandChain[1])) return;
-  if (dryRun) return;
-
-  logger.info(`Running: meta-ads ${commandChain.slice(1).join(' ')}`);
-
-  const auth = getAuth();
-  await auth.initialize();
-});
-
-program.parseAsync(process.argv).catch((err) => {
-  logger.error(err.message);
-  console.error('Error:', err.message);
-  process.exit(1);
-});
+main().catch((err) => fail(err instanceof CliError || err instanceof Error ? err : new Error(String(err))));

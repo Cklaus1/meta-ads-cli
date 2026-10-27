@@ -176,9 +176,9 @@ describe('optimization goals (#21)', () => {
     const { client } = mockClient(ok);
     const okRun = await run(registerBiddingCommands, client, ['bidding', 'validate', '--bid-strategy', 'LOWEST_COST_WITHOUT_CAP',
       '--optimization-goal', 'PROFILE_VISIT', '--billing-event', 'IMPRESSIONS']);
-    expect(JSON.parse(okRun.stdout).warnings).toEqual([]);
+    expect(JSON.parse(okRun.stdout).errors).toEqual([]);
     const bad = await run(registerBiddingCommands, client, ['bidding', 'validate', '--bid-strategy', 'LOWEST_COST_WITHOUT_CAP',
       '--optimization-goal', 'CONVERSIONS', '--billing-event', 'IMPRESSIONS']);
-    expect(JSON.parse(bad.stdout).warnings.join(' ')).toContain('OFFSITE_CONVERSIONS');
+    expect(JSON.parse(bad.stdout).errors.join(' ')).toContain('OFFSITE_CONVERSIONS');
   });
 });
