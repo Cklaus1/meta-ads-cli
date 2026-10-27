@@ -61,9 +61,11 @@ export function registerWebhookCommands(program: Command, getClient: () => MetaC
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (pageId: string, opts) => {
       const client = getClient();
+      const accessToken = await client.getPageToken(pageId);
       const response = await client.request(`${pageId}/subscribed_apps`, {
         method: 'POST',
         body: { subscribed_fields: opts.fields },
+        accessToken,
       });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
@@ -74,7 +76,8 @@ export function registerWebhookCommands(program: Command, getClient: () => MetaC
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (pageId: string, opts) => {
       const client = getClient();
-      const response = await client.request(`${pageId}/subscribed_apps`, { method: 'DELETE' });
+      const accessToken = await client.getPageToken(pageId);
+      const response = await client.request(`${pageId}/subscribed_apps`, { method: 'DELETE', accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 }

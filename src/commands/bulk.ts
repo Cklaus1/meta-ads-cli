@@ -8,6 +8,15 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/** Parse an integer option, rejecting non-numeric values and values below `min`. */
+export function parseIntOption(value: string, name: string, min: number): number {
+  const str = String(value).trim();
+  if (!/^-?\d+$/.test(str) || Number(str) < min) {
+    throw new Error(`${name} must be an integer >= ${min}, got: "${value}"`);
+  }
+  return Number(str);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -27,8 +36,8 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
       if (!opts.accountId) throw new Error('Account ID required');
       const client = getClient();
       const campaigns = JSON.parse(opts.config) as Array<Record<string, unknown>>;
-      const batchSize = parseInt(opts.batchSize);
-      const delayMs = parseInt(opts.delayMs);
+      const batchSize = parseIntOption(opts.batchSize, '--batch-size', 1);
+      const delayMs = parseIntOption(opts.delayMs, '--delay-ms', 0);
 
       const results = { created: [] as unknown[], failed: [] as unknown[] };
 
@@ -81,6 +90,7 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
     .action(handleErrors(async (opts) => {
       const client = getClient();
       const ids = opts.ids.split(',').map((id: string) => id.trim());
+      const delayMs = parseIntOption(opts.delayMs, '--delay-ms', 0);
       const results = { updated: [] as unknown[], failed: [] as unknown[] };
 
       for (const id of ids) {
@@ -90,7 +100,7 @@ export function registerBulkCommands(program: Command, getClient: () => MetaClie
         } catch (err) {
           results.failed.push({ id, error: (err as Error).message });
         }
-        if (parseInt(opts.delayMs) > 0) await sleep(parseInt(opts.delayMs));
+        if (delayMs > 0) await sleep(delayMs);
       }
 
       console.log(formatOutput({

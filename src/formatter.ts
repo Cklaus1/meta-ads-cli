@@ -30,6 +30,11 @@ function flattenObject(obj: Record<string, unknown>, prefix = ''): Record<string
       if (val.length > 0 && typeof val[0] === 'object') {
         const summaries = val.map((item) => {
           if (typeof item === 'object' && item !== null) {
+            // {name, values} pairs (e.g. lead field_data) keep their values.
+            const pair = item as Record<string, unknown>;
+            if (typeof pair.name === 'string' && Array.isArray(pair.values)) {
+              return `${pair.name}=${pair.values.join(';')}`;
+            }
             const flat = flattenObject(item as Record<string, unknown>);
             return flat['name'] || flat['id'] || flat['displayName'] || Object.values(flat)[0] || '';
           }
@@ -145,12 +150,7 @@ function toYaml(data: unknown, indent: number): string {
   if (data === null || data === undefined) return `${pad}null\n`;
   if (typeof data === 'boolean') return `${pad}${data}\n`;
   if (typeof data === 'number') return `${pad}${data}\n`;
-  if (typeof data === 'string') {
-    if (data.includes('\n') || data.includes('"') || data.includes(':')) {
-      return `${pad}"${data.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"\n`;
-    }
-    return `${pad}${data}\n`;
-  }
+  if (typeof data === 'string') return `${pad}${yamlString(data)}\n`;
   if (Array.isArray(data)) {
     if (data.length === 0) return `${pad}[]\n`;
     let out = '';
@@ -159,9 +159,9 @@ function toYaml(data: unknown, indent: number): string {
         const entries = Object.entries(item as Record<string, unknown>);
         if (entries.length > 0) {
           const [firstKey, firstVal] = entries[0];
-          out += `${pad}- ${firstKey}: ${inlineValue(firstVal)}\n`;
+          out += `${pad}- ${yamlString(firstKey)}: ${inlineValue(firstVal)}\n`;
           for (let j = 1; j < entries.length; j++) {
-            out += `${pad}  ${entries[j][0]}: ${inlineValue(entries[j][1])}\n`;
+            out += `${pad}  ${yamlString(entries[j][0])}: ${inlineValue(entries[j][1])}\n`;
           }
           continue;
         }
@@ -174,7 +174,8 @@ function toYaml(data: unknown, indent: number): string {
     const entries = Object.entries(data as Record<string, unknown>);
     if (entries.length === 0) return `${pad}{}\n`;
     let out = '';
-    for (const [key, val] of entries) {
+    for (const [rawKey, val] of entries) {
+      const key = yamlString(rawKey);
       if (typeof val === 'object' && val !== null && !Array.isArray(val)) {
         out += `${pad}${key}:\n${toYaml(val, indent + 1)}`;
       } else if (Array.isArray(val)) {
@@ -191,12 +192,7 @@ function toYaml(data: unknown, indent: number): string {
 function inlineValue(val: unknown): string {
   if (val === null || val === undefined) return 'null';
   if (typeof val === 'boolean' || typeof val === 'number') return String(val);
-  if (typeof val === 'string') {
-    if (val.includes('\n') || val.includes('"') || val.includes(':') || val.includes('#')) {
-      return `"${val.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`;
-    }
-    return val;
-  }
+  if (typeof val === 'string') return yamlString(val);
   if (Array.isArray(val)) return JSON.stringify(val);
   if (typeof val === 'object') return JSON.stringify(val);
   return String(val);
@@ -212,8 +208,27 @@ function extractItems(data: unknown): unknown[] {
   return [data];
 }
 
+const YAML_KEYWORDS = /^(true|false|yes|no|on|off|null|y|n|~)$/i;
+
+/**
+ * Emit a string as a YAML scalar, quoting anything a YAML parser would read
+ * as another type (numbers, booleans, null) or that contains special chars.
+ * Quoting IDs matters: large numeric IDs lose precision as numbers.
+ */
+function yamlString(val: string): string {
+  if (/^[A-Za-z_][A-Za-z0-9_ ./-]*$/.test(val) && !val.endsWith(' ') && !YAML_KEYWORDS.test(val)) {
+    return val;
+  }
+  return JSON.stringify(val);
+}
+
 function csvEscape(val: string): string {
-  if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+  // Neutralise spreadsheet formulas (=, +, -, @, tab, CR) in untrusted text
+  // like lead answers, but leave plain numbers such as -1.5 alone.
+  if (/^[=+\-@\t\r]/.test(val) && !/^[+-]?\d+(\.\d+)?$/.test(val)) {
+    val = `'${val}`;
+  }
+  if (val.includes(',') || val.includes('"') || val.includes('\n') || val.includes('\r')) {
     return '"' + val.replace(/"/g, '""') + '"';
   }
   return val;

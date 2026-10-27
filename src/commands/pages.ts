@@ -8,6 +8,24 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/**
+ * Resolve the Page access token for a write on a Page-owned object. Post IDs
+ * look like `<pageId>_<postId>`, so the Page is taken from the prefix unless
+ * --page-id is given (comment IDs need --page-id, their prefix is the post).
+ */
+export async function pageTokenFor(client: MetaClient, objectId: string, pageId?: string): Promise<string | undefined> {
+  const id = pageId || (objectId.includes('_') ? objectId.split('_')[0] : '');
+  if (!id) {
+    throw new Error(`Can't tell which Page owns ${objectId}. Pass --page-id <id>.`);
+  }
+  try {
+    return await client.getPageToken(id);
+  } catch (err) {
+    if (pageId) throw err;
+    throw new Error(`${(err as Error).message} If ${objectId} isn't a <pageId>_<postId> ID, pass --page-id <id>.`);
+  }
+}
+
 export function registerPageCommands(program: Command, getClient: () => MetaClient): void {
   const pages = program.command('pages').description('Facebook Page management');
 
@@ -114,9 +132,11 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
         endpoint = `${pageId}/photos`;
       }
 
+      const accessToken = await client.getPageToken(pageId);
       const response = await client.request(endpoint, {
         method: 'POST',
         body,
+        accessToken,
       });
 
       console.log(formatOutput(response.data, opts.output as OutputFormat));
@@ -128,6 +148,7 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
     .option('--message <text>', 'New message text')
     .option('--is-hidden', 'Hide the post')
     .option('--is-published', 'Publish a draft post')
+    .option('--page-id <id>', 'Page that owns the post (default: prefix of <postId>)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (postId: string, opts) => {
       const client = getClient();
@@ -141,9 +162,11 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
         throw new Error('No update parameters provided');
       }
 
+      const accessToken = await pageTokenFor(client, postId, opts.pageId);
       const response = await client.request(postId, {
         method: 'POST',
         body,
+        accessToken,
       });
 
       console.log(formatOutput(response.data, opts.output as OutputFormat));
@@ -152,10 +175,12 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
   pages
     .command('delete-post <postId>')
     .description('Delete a page post')
+    .option('--page-id <id>', 'Page that owns the post (default: prefix of <postId>)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (postId: string, opts) => {
       const client = getClient();
-      const response = await client.request(postId, { method: 'DELETE' });
+      const accessToken = await pageTokenFor(client, postId, opts.pageId);
+      const response = await client.request(postId, { method: 'DELETE', accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -188,12 +213,15 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
     .command('reply <commentId>')
     .description('Reply to a comment')
     .requiredOption('--message <text>', 'Reply message')
+    .option('--page-id <id>', 'Page replying (required for comment IDs; post IDs use their prefix)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (commentId: string, opts) => {
       const client = getClient();
+      const accessToken = await pageTokenFor(client, commentId, opts.pageId);
       const response = await client.request(`${commentId}/comments`, {
         method: 'POST',
         body: { message: opts.message },
+        accessToken,
       });
 
       console.log(formatOutput(response.data, opts.output as OutputFormat));
@@ -203,17 +231,20 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
     .command('delete-comment <commentId>')
     .description('Delete or hide a comment')
     .option('--hide', 'Hide instead of delete')
+    .requiredOption('--page-id <id>', 'Page that owns the post the comment is on')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (commentId: string, opts) => {
       const client = getClient();
+      const accessToken = await pageTokenFor(client, commentId, opts.pageId);
       if (opts.hide) {
         const response = await client.request(commentId, {
           method: 'POST',
           body: { is_hidden: 'true' },
+          accessToken,
         });
         console.log(formatOutput(response.data, opts.output as OutputFormat));
       } else {
-        const response = await client.request(commentId, { method: 'DELETE' });
+        const response = await client.request(commentId, { method: 'DELETE', accessToken });
         console.log(formatOutput(response.data, opts.output as OutputFormat));
       }
     }));
@@ -248,7 +279,8 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
         }
       }
 
-      const response = await client.request(`${pageId}/insights`, { params });
+      const accessToken = await client.getPageToken(pageId);
+      const response = await client.request(`${pageId}/insights`, { params, accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -291,7 +323,11 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (pageId: string, opts) => {
       const client = getClient();
-      const response = await client.uploadFile(`${pageId}/videos`, opts.file);
+      const fields: Record<string, string> = {};
+      if (opts.title) fields.title = opts.title;
+      if (opts.description) fields.description = opts.description;
+      const accessToken = await client.getPageToken(pageId);
+      const response = await client.uploadFile(`${pageId}/videos`, opts.file, fields, { accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -328,7 +364,8 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
         body.status = 'SCHEDULED_UNPUBLISHED';
       }
 
-      const response = await client.request(`${pageId}/live_videos`, { method: 'POST', body });
+      const accessToken = await client.getPageToken(pageId);
+      const response = await client.request(`${pageId}/live_videos`, { method: 'POST', body, accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -368,7 +405,8 @@ export function registerPageCommands(program: Command, getClient: () => MetaClie
       if (opts.location) body.location = opts.location;
       if (opts.isOnline) body.is_online = 'true';
 
-      const response = await client.request(`${pageId}/events`, { method: 'POST', body });
+      const accessToken = await client.getPageToken(pageId);
+      const response = await client.request(`${pageId}/events`, { method: 'POST', body, accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 }

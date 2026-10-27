@@ -21,22 +21,33 @@ duplication, etc.) without per-command configuration.
 
 ### What it checks
 
-The guard inspects `POST` request bodies (creates **and** edits — Meta uses POST
-for both) and rejects the call if any of these fields exceeds the cap:
+The guard inspects the body and query params of every write (creates **and**
+edits — Meta uses POST for both) and rejects the call if any of these fields
+exceeds the cap:
 
 | Field | Where it appears |
 |-------|------------------|
-| `daily_budget` | campaigns, ad sets |
-| `lifetime_budget` | campaigns, ad sets |
+| `daily_budget`, `lifetime_budget` | campaigns, ad sets |
 | `spend_cap` | campaigns, accounts |
-| `bid_amount` | ad sets, ads |
+| `bid_amount`, `bid_cap` | campaigns, ad sets, ads |
+| `daily_spend_cap`, `lifetime_spend_cap` | ad sets |
+| `daily_min_spend_target`, `lifetime_min_spend_target` | ad sets |
+| `budget_value` (ABSOLUTE budget schedules) | campaign budget schedules |
+| `budget` | reach & frequency predictions |
+
+When a cap is set, a budget field that isn't a plain number of cents (e.g.
+`5000abc`) is blocked too, since it can't be checked. IDs are validated before
+they reach the URL, so a value like `123?daily_budget=...` is rejected.
 
 **All values are in cents** — the same unit the Meta API and this CLI use
 throughout. `--max-spend-cap 1000` means **$10.00**.
 
 ### How to set it
 
-Two ways, flag takes precedence over env:
+Three sources: the `--max-spend-cap` flag, the `META_ADS_CLI_MAX_SPEND_CAP` env
+var, and a profile's stored cap. **The strictest one wins**: a flag can lower
+the env/profile cap for one command but can never raise it. An invalid value
+(`abc`, `5,000`, `$50`) is an error rather than being ignored.
 
 ```bash
 # Per-invocation flag
@@ -48,15 +59,16 @@ meta-ads campaigns create --daily-budget 5000 ...
 ```
 
 When delegating to an engineer or agent, set the **env var** in their
-environment. Unlike a flag, they can't omit it on a one-off command.
+environment. Unlike a flag, they can't omit it on a one-off command, and a
+flag can't loosen it.
 
 ### What you see when it blocks
 
 ```
 $ meta-ads --max-spend-cap 10000 campaigns create --daily-budget 50000 ...
 Error: Spend-cap guard: daily_budget=50000¢ ($500.00) exceeds the
---max-spend-cap of 10000¢ ($100.00). Raise --max-spend-cap /
-META_ADS_CLI_MAX_SPEND_CAP, or lower the budget.
+spend cap of 10000¢ ($100.00). Lower the budget, or ask the account owner
+to change the cap.
 ```
 
 ### Validated during `--dry-run` too
@@ -78,8 +90,8 @@ meta-ads --dry-run --max-spend-cap 1000 campaigns create --daily-budget 5000 ...
 - **Per-field, not cumulative.** It caps each individual budget field on each
   write; it does not track total spend across many campaigns. For a true account
   ceiling, use Meta's account-level `spend_cap` (section 3).
-- **POST-only.** `GET` (reads) and `DELETE` are never budget-relevant, so they
-  pass through.
+- **Writes only.** `GET` (reads) are never budget-relevant, so they pass
+  through.
 
 ---
 

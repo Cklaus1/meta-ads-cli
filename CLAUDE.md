@@ -41,7 +41,7 @@ npm run test:watch         # Watch mode
 | File | Purpose |
 |------|---------|
 | `src/auth.ts` | OAuth2 flow on `localhost:8899`, token caching (keytar → file fallback at `~/.config/meta-ads-cli/token-cache.json`), long-lived token exchange |
-| `src/meta-client.ts` | Graph API HTTP client: `request()`, `requestAllPages()`, `uploadFile()`. Retry 3x with backoff on 429/5xx. Dry-run and read-only enforcement |
+| `src/meta-client.ts` | Graph API HTTP client: `request()`, `requestAllPages()`, `uploadFile()`. Retry 3x with backoff on 429/rate-limit codes; 5xx and network errors retried for GET/DELETE only (POST creates are not idempotent). Validates endpoint IDs, spend-cap guard. Dry-run and read-only enforcement |
 | `src/formatter.ts` | `formatOutput(data, format)` — JSON, table, CSV, text, YAML. Auto-extracts from `data.data[]`. Flattens nested objects to dot-notation |
 | `src/errors.ts` | `handleErrors()` — wraps async actions, catches and prints user-friendly messages |
 | `src/validate.ts` | Path safety, control char rejection, `act_` prefix validation, numeric entity ID validation |
@@ -100,9 +100,13 @@ Key conventions:
 | `META_ADS_CLI_ACCESS_TOKEN` | Direct access token (bypasses OAuth) |
 | `META_ADS_CLI_ACCOUNT_ID` | Default ad account ID for `--account-id` |
 | `META_ADS_CLI_API_VERSION` | Graph API version (default: v25.0) |
-| `META_ADS_CLI_MAX_SPEND_CAP` | Cents ceiling on budget fields in writes (`--max-spend-cap`); blocks over-budget creates/edits. Great for delegated/agent access |
+| `META_ADS_CLI_MAX_SPEND_CAP` | Cents ceiling on budget fields in writes; blocks over-budget creates/edits. The strictest of this, `--max-spend-cap` and the profile cap applies. Great for delegated/agent access |
 | `META_ADS_CLI_USAGE_THRESHOLD` | Rate-limit usage % (default 75) at which the client proactively throttles |
 | `META_ADS_CLI_MAX_WAIT_MS` | Max auto-wait on a rate-limit throttle (default 90000) |
+| `META_ADS_CLI_HTTP_TIMEOUT_MS` / `META_ADS_CLI_UPLOAD_TIMEOUT_MS` | Per-request HTTP timeout (default 60000) / upload timeout (default 600000) |
+| `META_ADS_CLI_NO_KEYCHAIN` | Skip the OS keychain and use the file token cache only |
+| `META_ADS_CLI_AUTH_SCOPES` | Override the OAuth scope list requested by `auth login` |
+| `META_ADS_CLI_THREADS_ACCESS_TOKEN` | Threads token for `threads` commands (graph.threads.net) |
 | `META_ADS_CLI_ANTHROPIC_API_KEY` / `ANTHROPIC_API_KEY` | Enable LLM-backed `ai` commands (else falls back to local `claude` CLI or heuristics) |
 | `META_ADS_CLI_LOG_LEVEL` | debug, info, warn, error, none |
 | `META_ADS_CLI_LOG_FILE` | Log file path (daily rotation) |
@@ -113,4 +117,4 @@ Key conventions:
 - Auth: `access_token` query parameter
 - POST body: `application/x-www-form-urlencoded`
 - Pagination: cursor-based via `paging.cursors.after`
-- Retry: 3 attempts with exponential backoff for 429/5xx
+- Retry: 3 attempts with exponential backoff for 429/rate-limit codes; 5xx/network errors only for GET/DELETE

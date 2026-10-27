@@ -33,7 +33,8 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
       };
       if (opts.tag) body.tag = opts.tag;
 
-      const response = await client.request(`${pageId}/messages`, { method: 'POST', body });
+      const accessToken = await client.getPageToken(pageId);
+      const response = await client.request(`${pageId}/messages`, { method: 'POST', body, accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -55,7 +56,8 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
         }),
         messaging_type: 'RESPONSE',
       };
-      const response = await client.request(`${pageId}/messages`, { method: 'POST', body });
+      const accessToken = await client.getPageToken(pageId);
+      const response = await client.request(`${pageId}/messages`, { method: 'POST', body, accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -65,8 +67,10 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (pageId: string, opts) => {
       const client = getClient();
+      const accessToken = await client.getPageToken(pageId);
       const response = await client.request(`${pageId}/messenger_profile`, {
         params: { fields: 'greeting,get_started,persistent_menu,ice_breakers,whitelisted_domains' },
+        accessToken,
       });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
@@ -91,7 +95,8 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
 
       if (Object.keys(body).length === 0) throw new Error('No settings provided');
 
-      const response = await client.request(`${pageId}/messenger_profile`, { method: 'POST', body });
+      const accessToken = await client.getPageToken(pageId);
+      const response = await client.request(`${pageId}/messenger_profile`, { method: 'POST', body, accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -108,9 +113,10 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
         limit: opts.limit,
       };
       const endpoint = `${pageId}/conversations`;
+      const accessToken = await client.getPageToken(pageId);
       const response = opts.all
-        ? await client.requestAllPages(endpoint, { params })
-        : await client.request(endpoint, { params });
+        ? await client.requestAllPages(endpoint, { params, accessToken })
+        : await client.request(endpoint, { params, accessToken });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -118,11 +124,14 @@ export function registerMessengerCommands(program: Command, getClient: () => Met
     .command('messages <conversationId>')
     .description('List messages in a Messenger conversation')
     .option('--limit <n>', 'Maximum messages', '25')
+    .requiredOption('--page-id <id>', 'Page that owns the conversation (its Page token is required)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (conversationId: string, opts) => {
       const client = getClient();
+      const accessToken = await client.getPageToken(opts.pageId);
       const response = await client.request(`${conversationId}/messages`, {
         params: { fields: 'id,message,from,to,created_time,attachments', limit: opts.limit },
+        accessToken,
       });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));

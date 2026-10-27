@@ -8,8 +8,8 @@ export function validateSafeOutputDir(dir: string): string {
     throw new Error(`Output directory must be a relative path, got: ${dir}`);
   }
   const resolved = path.resolve(dir);
-  const cwd = process.cwd();
-  if (!resolved.startsWith(cwd)) {
+  const rel = path.relative(process.cwd(), resolved);
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     throw new Error(`Output directory must be within current working directory`);
   }
   return resolved;
@@ -66,4 +66,32 @@ export function validateEntityId(id: string, entityType: string): string {
     throw new Error(`Invalid ${entityType} ID: ${id}. Expected numeric ID.`);
   }
   return id;
+}
+
+/**
+ * Validates a Graph API endpoint path before it is put into a URL. Every
+ * segment must be a plain object ID or edge name, so a user-supplied ID can't
+ * smuggle in a query string, another path, or encoded characters (which
+ * would let budget params bypass the spend-cap guard).
+ */
+export function validateEndpoint(endpoint: string): string {
+  const segments = endpoint.split('/');
+  if (!endpoint || segments.some(seg => !/^[A-Za-z0-9_]+$/.test(seg))) {
+    throw new Error(`Invalid ID or endpoint: "${endpoint}". IDs may contain only letters, digits and underscores.`);
+  }
+  return endpoint;
+}
+
+/**
+ * Parses a non-negative integer number of cents from a flag, env var or
+ * profile. Throws instead of silently ignoring bad input, so a typo can't
+ * disable the spend-cap guard.
+ */
+export function parseCents(value: string | number | undefined, source: string): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  const str = String(value).trim();
+  if (!/^\d+$/.test(str)) {
+    throw new Error(`${source} must be a whole number of cents, got: "${value}"`);
+  }
+  return Number(str);
 }

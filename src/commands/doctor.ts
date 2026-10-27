@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { AuthManager } from '../auth.js';
-import { MetaClient, API_VERSION } from '../meta-client.js';
+import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 import { isLlmAvailable, llmProviderLabel } from '../llm.js';
@@ -96,10 +96,10 @@ export function registerDoctorCommand(
 
         if (appId && appSecret) {
           try {
-            const url = `https://graph.facebook.com/${API_VERSION}/debug_token`
+            const url = `https://graph.facebook.com/${auth.getApiVersion()}/debug_token`
               + `?input_token=${encodeURIComponent(token)}`
               + `&access_token=${encodeURIComponent(`${appId}|${appSecret}`)}`;
-            const resp = await fetch(url);
+            const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) });
             const json = await resp.json() as {
               data?: { expires_at?: number; data_access_expires_at?: number; scopes?: string[]; is_valid?: boolean };
             };
@@ -157,7 +157,8 @@ export function registerDoctorCommand(
       }
 
       // ── 4. API version & deprecation posture ───────────────────────────────
-      const configuredVersion = process.env.META_ADS_CLI_API_VERSION || API_VERSION;
+      // Resolved version: --api-version > profile > env > default.
+      const configuredVersion = auth.getApiVersion();
       const major = parseMajorVersion(configuredVersion);
       if (Number.isNaN(major)) {
         checks.push({ name: 'API version', status: 'warn', detail: `Unrecognized version string "${configuredVersion}".` });
@@ -232,9 +233,22 @@ export function registerDoctorCommand(
 
       // ── 6b. Safety guards (spend cap) ──────────────────────────────────────
       {
-        const envCap = Number(process.env.META_ADS_CLI_MAX_SPEND_CAP);
-        const cap = Number.isFinite(envCap) ? envCap : 0;
-        if (cap > 0) {
+        // The effective cap: the strictest of --max-spend-cap, env and profile.
+        let cap = 0;
+        let capError: string | undefined;
+        try {
+          cap = getClient().getMaxSpendCapCents();
+        } catch (err) {
+          capError = (err as Error).message;
+        }
+        if (capError) {
+          checks.push({
+            name: 'Spend-cap guard',
+            status: 'fail',
+            detail: capError,
+            fix: 'Set the cap to a whole number of cents.',
+          });
+        } else if (cap > 0) {
           checks.push({
             name: 'Spend-cap guard',
             status: 'ok',

@@ -203,7 +203,7 @@ describe('MetaClient', () => {
     it('extracts pagination cursor', async () => {
       const responseData = {
         data: [{ id: '1' }],
-        paging: { cursors: { after: 'cursor_abc' } },
+        paging: { cursors: { after: 'cursor_abc' }, next: 'https://graph.facebook.com/next' },
       };
       vi.spyOn(globalThis, 'fetch').mockResolvedValue({
         ok: true,
@@ -421,7 +421,7 @@ describe('MetaClient', () => {
             Promise.resolve(
               JSON.stringify({
                 data: [{ id: '1' }],
-                paging: { cursors: { after: 'cursor1' } },
+                paging: { cursors: { after: 'cursor1' }, next: 'https://graph.facebook.com/next' },
               })
             ),
         } as Response)
@@ -451,7 +451,7 @@ describe('MetaClient', () => {
             Promise.resolve(
               JSON.stringify({
                 data: [{ id: '1' }],
-                paging: { cursors: { after: 'next' } },
+                paging: { cursors: { after: 'next' }, next: 'https://graph.facebook.com/next' },
               })
             ),
         } as Response)

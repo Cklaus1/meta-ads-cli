@@ -262,7 +262,7 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
 
   creatives
     .command('update <creativeId>')
-    .description('Update a creative (name or object_story_spec fields)')
+    .description('Update a creative. Story fields (text, link, CTA) create a new creative, since Meta creatives are immutable')
     .option('--name <name>', 'New creative name')
     .option('--caption <text>', 'Link caption (display URL)')
     .option('--message <text>', 'Ad body text')
@@ -270,6 +270,8 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
     .option('--description <text>', 'Ad description')
     .option('--link-url <url>', 'Destination URL')
     .option('--cta <type>', 'Call to action type (LEARN_MORE, SHOP_NOW, SIGN_UP, etc.)')
+    .option('--account-id <id>', 'Ad account for the new creative (defaults to the original creative\'s account)')
+    .option('--ad-id <id>', 'Point this ad at the new creative')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (creativeId: string, opts) => {
       const client = getClient();
@@ -282,11 +284,13 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
         || opts.description || opts.linkUrl || opts.cta;
 
       if (hasStoryUpdate) {
-        // Fetch current creative to merge updates
+        // object_story_spec can't be edited on an existing creative, so build
+        // a new creative from the merged spec.
         const current = await client.request(creativeId, {
-          params: { fields: 'object_story_spec' },
+          params: { fields: 'name,account_id,object_story_spec' },
         });
-        const currentSpec = (current.data as Record<string, unknown>).object_story_spec as Record<string, unknown> || {};
+        const currentData = current.data as Record<string, unknown>;
+        const currentSpec = currentData.object_story_spec as Record<string, unknown> || {};
         const currentLinkData = (currentSpec.link_data || {}) as Record<string, unknown>;
 
         const linkData: Record<string, unknown> = { ...currentLinkData };
@@ -301,6 +305,34 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
           ...currentSpec,
           link_data: linkData,
         });
+
+        const accountId = opts.accountId || (currentData.account_id ? `act_${currentData.account_id}` : '');
+        if (!accountId) {
+          throw new Error('Could not determine the ad account for the new creative. Use --account-id');
+        }
+        body.name = opts.name || String(currentData.name || `Copy of ${creativeId}`);
+
+        const created = await client.request(`${accountId}/adcreatives`, { method: 'POST', body });
+        const newId = (created.data as { id?: string }).id;
+        const result: Record<string, unknown> = {
+          previous_creative_id: creativeId,
+          new_creative_id: newId,
+          ...(created.data as Record<string, unknown>),
+        };
+
+        if (opts.adId && newId) {
+          const repointed = await client.request(opts.adId, {
+            method: 'POST',
+            body: { creative: JSON.stringify({ creative_id: newId }) },
+          });
+          result.ad_id = opts.adId;
+          result.ad_update = repointed.data;
+        } else if (!opts.adId) {
+          result.note = 'Ads still use the previous creative. Re-run with --ad-id, or: meta-ads ads update <adId> --creative-id <new id>';
+        }
+
+        console.log(formatOutput(result, opts.output as OutputFormat));
+        return;
       }
 
       if (Object.keys(body).length === 0) {
@@ -363,7 +395,10 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
 
       if (opts.file) {
         // Upload from local file using multipart
-        const response = await client.uploadFile(`${opts.accountId}/advideos`, opts.file);
+        const fields: Record<string, string> = {};
+        if (opts.title) fields.title = opts.title;
+        if (opts.description) fields.description = opts.description;
+        const response = await client.uploadFile(`${opts.accountId}/advideos`, opts.file, fields);
         console.log(formatOutput(response.data, opts.output as OutputFormat));
       } else {
         // Upload from URL
@@ -405,7 +440,10 @@ export function registerCreativeCommands(program: Command, getClient: () => Meta
 
         if (imageUrl) {
           const { writeFileSync } = await import('fs');
-          const imgResponse = await fetch(String(imageUrl));
+          const imgResponse = await fetch(String(imageUrl), { signal: AbortSignal.timeout(60_000) });
+          if (!imgResponse.ok) {
+            throw new Error(`Image download failed (${imgResponse.status} ${imgResponse.statusText}). The image URL may have expired.`);
+          }
           const buffer = Buffer.from(await imgResponse.arrayBuffer());
           writeFileSync(opts.outputPath, buffer);
           console.log(formatOutput({

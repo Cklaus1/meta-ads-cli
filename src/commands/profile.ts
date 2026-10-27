@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
-import { listProfiles, setProfile, deleteProfile, getProfile } from '../profiles.js';
+import { listProfiles, setProfile, deleteProfile, getProfile, type Profile } from '../profiles.js';
 
 export function registerProfileCommands(program: Command): void {
   const profile = program.command('profile').description('Manage named profiles for multiple accounts');
@@ -55,7 +55,7 @@ export function registerProfileCommands(program: Command): void {
     .option('--spend-cap <cents>', 'Cents ceiling on budget fields in writes, stored with the profile (spend-cap guard)')
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (opts) => {
-      const p = getProfile(opts.name) || { name: opts.name };
+      const p: Profile = getProfile(opts.name) || { name: opts.name };
 
       if (opts.accessToken) p.accessToken = opts.accessToken;
       if (opts.accountId) p.accountId = opts.accountId;

@@ -211,16 +211,28 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       if (opts.adsetSchedule) body.adset_schedule = opts.adsetSchedule;
 
       // Build targeting with placement controls
-      const targeting = opts.targeting ? JSON.parse(opts.targeting) : {};
-      let hasPlacement = false;
-      if (opts.publisherPlatforms) { targeting.publisher_platforms = opts.publisherPlatforms.split(','); hasPlacement = true; }
-      if (opts.facebookPositions) { targeting.facebook_positions = opts.facebookPositions.split(','); hasPlacement = true; }
-      if (opts.instagramPositions) { targeting.instagram_positions = opts.instagramPositions.split(','); hasPlacement = true; }
-      if (opts.threadsPositions) { targeting.threads_positions = opts.threadsPositions.split(','); hasPlacement = true; }
-      if (opts.messengerPositions) { targeting.messenger_positions = opts.messengerPositions.split(','); hasPlacement = true; }
-      if (opts.whatsappPositions) { targeting.whatsapp_positions = opts.whatsappPositions.split(','); hasPlacement = true; }
-      if (opts.audienceNetworkPositions) { targeting.audience_network_positions = opts.audienceNetworkPositions.split(','); hasPlacement = true; }
-      if (opts.devicePlatforms) { targeting.device_platforms = opts.devicePlatforms.split(','); hasPlacement = true; }
+      const placements: Record<string, string[]> = {};
+      if (opts.publisherPlatforms) placements.publisher_platforms = opts.publisherPlatforms.split(',');
+      if (opts.facebookPositions) placements.facebook_positions = opts.facebookPositions.split(',');
+      if (opts.instagramPositions) placements.instagram_positions = opts.instagramPositions.split(',');
+      if (opts.threadsPositions) placements.threads_positions = opts.threadsPositions.split(',');
+      if (opts.messengerPositions) placements.messenger_positions = opts.messengerPositions.split(',');
+      if (opts.whatsappPositions) placements.whatsapp_positions = opts.whatsappPositions.split(',');
+      if (opts.audienceNetworkPositions) placements.audience_network_positions = opts.audienceNetworkPositions.split(',');
+      if (opts.devicePlatforms) placements.device_platforms = opts.devicePlatforms.split(',');
+      const hasPlacement = Object.keys(placements).length > 0;
+
+      let targeting: Record<string, unknown> = {};
+      if (opts.targeting) {
+        targeting = JSON.parse(opts.targeting);
+      } else if (hasPlacement) {
+        // Meta replaces the whole targeting spec, so merge placements into the
+        // current one instead of wiping geo/audiences.
+        const current = await client.request(adsetId, { params: { fields: 'targeting' } });
+        const existing = (current.data as { targeting?: Record<string, unknown> }).targeting;
+        if (existing) targeting = existing;
+      }
+      Object.assign(targeting, placements);
       if (opts.targeting || hasPlacement) body.targeting = JSON.stringify(targeting);
       if (opts.attributionSpec) body.attribution_spec = opts.attributionSpec;
       if (opts.pacingType) body.pacing_type = JSON.stringify([opts.pacingType]);

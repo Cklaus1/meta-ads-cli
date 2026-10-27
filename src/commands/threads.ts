@@ -1,15 +1,22 @@
 import { Command } from 'commander';
-import { MetaClient } from '../meta-client.js';
+import { MetaClient, THREADS_BASE_URL, type MetaRequestOptions } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors } from '../errors.js';
 
 /**
- * Threads API uses a separate base URL: https://graph.threads.net
- * We use the MetaClient's request method but override the endpoint with full URL.
+ * Threads API lives on a separate host (graph.threads.net) and needs a Threads
+ * user token. Set META_ADS_CLI_THREADS_ACCESS_TOKEN to one; otherwise the
+ * normal access token is sent.
  */
+function threadsApi(): Pick<MetaRequestOptions, 'baseUrl' | 'accessToken'> {
+  return {
+    baseUrl: THREADS_BASE_URL,
+    accessToken: process.env.META_ADS_CLI_THREADS_ACCESS_TOKEN || undefined,
+  };
+}
 
 export function registerThreadsCommands(program: Command, getClient: () => MetaClient): void {
-  const threads = program.command('threads').description('Threads content publishing, insights, and management');
+  const threads = program.command('threads').description('Threads content publishing, insights, and management (uses META_ADS_CLI_THREADS_ACCESS_TOKEN if set)');
 
   threads
     .command('profile')
@@ -22,7 +29,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
         fields: 'id,username,name,threads_profile_picture_url,threads_biography',
       };
 
-      const response = await client.request(`${opts.userId}`, { params });
+      const response = await client.request(`${opts.userId}`, { params, ...threadsApi() });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -60,6 +67,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
 
       const containerResponse = await client.request(`${opts.userId}/threads`, {
         method: 'POST',
+        ...threadsApi(),
         body: containerBody,
       });
 
@@ -68,6 +76,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
       // Step 2: Publish the container
       const publishResponse = await client.request(`${opts.userId}/threads_publish`, {
         method: 'POST',
+        ...threadsApi(),
         body: { creation_id: containerId },
       });
 
@@ -92,8 +101,8 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
 
       const endpoint = `${opts.userId}/threads`;
       const response = opts.all
-        ? await client.requestAllPages(endpoint, { params })
-        : await client.request(endpoint, { params });
+        ? await client.requestAllPages(endpoint, { params, ...threadsApi() })
+        : await client.request(endpoint, { params, ...threadsApi() });
 
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
@@ -108,7 +117,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
         fields: 'id,text,username,permalink,timestamp,media_type,media_url,thumbnail_url,shortcode,is_quote_post,has_replies,root_post,replied_to,is_reply,hide_status',
       };
 
-      const response = await client.request(threadId, { params });
+      const response = await client.request(threadId, { params, ...threadsApi() });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -127,8 +136,8 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
 
       const endpoint = `${threadId}/replies`;
       const response = opts.all
-        ? await client.requestAllPages(endpoint, { params })
-        : await client.request(endpoint, { params });
+        ? await client.requestAllPages(endpoint, { params, ...threadsApi() })
+        : await client.request(endpoint, { params, ...threadsApi() });
 
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
@@ -148,8 +157,8 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
 
       const endpoint = `${threadId}/conversation`;
       const response = opts.all
-        ? await client.requestAllPages(endpoint, { params })
-        : await client.request(endpoint, { params });
+        ? await client.requestAllPages(endpoint, { params, ...threadsApi() })
+        : await client.request(endpoint, { params, ...threadsApi() });
 
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
@@ -162,7 +171,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
     .option('-o, --output <format>', 'Output format', 'json')
     .action(handleErrors(async (threadId: string, opts) => {
       const client = getClient();
-      const response = await client.request(threadId, { method: 'DELETE' });
+      const response = await client.request(threadId, { method: 'DELETE', ...threadsApi() });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -175,6 +184,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
       const client = getClient();
       const response = await client.request(`${replyId}/manage_reply`, {
         method: 'POST',
+        ...threadsApi(),
         body: { hide: opts.unhide ? 'false' : 'true' },
       });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
@@ -198,7 +208,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
       if (opts.since) params.since = opts.since;
       if (opts.until) params.until = opts.until;
 
-      const response = await client.request(`${opts.userId}/threads_insights`, { params });
+      const response = await client.request(`${opts.userId}/threads_insights`, { params, ...threadsApi() });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -213,7 +223,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
         metric: opts.metrics,
       };
 
-      const response = await client.request(`${threadId}/insights`, { params });
+      const response = await client.request(`${threadId}/insights`, { params, ...threadsApi() });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 
@@ -232,7 +242,7 @@ export function registerThreadsCommands(program: Command, getClient: () => MetaC
         limit: opts.limit,
       };
 
-      const response = await client.request('threads/search', { params });
+      const response = await client.request('threads/search', { params, ...threadsApi() });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
 }

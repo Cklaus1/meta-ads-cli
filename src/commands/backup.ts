@@ -220,7 +220,7 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
 
       // Safety gate: require --yes for any live (non-dry-run) restore.
       // The MetaClient still enforces --read-only / --dry-run independently.
-      const dryRun = process.argv.includes('--dry-run');
+      const dryRun = client.isDryRun();
       if (!opts.yes && !dryRun) {
         throw new Error(
           'Restore creates live objects. Re-run with --yes to confirm, or add --dry-run to preview. '
@@ -234,11 +234,21 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
       const adsetMap: Record<string, string> = {};
       const creativeMap: Record<string, string> = {};
       const warnings: string[] = [];
+      // Objects whose create call threw; their children are skipped.
+      const failures: Array<{ type: string; id: string; error: string }> = [];
+      const failedCreatives = new Set<string>();
       let created = 0;
 
       let synthSeq = 0;
-      async function create(endpoint: string, body: Record<string, string>): Promise<string | null> {
-        const resp = await client.request(endpoint, { method: 'POST', body });
+      async function create(endpoint: string, body: Record<string, string>, type: string, oldId: string): Promise<string | null> {
+        let resp;
+        try {
+          resp = await client.request(endpoint, { method: 'POST', body });
+        } catch (err) {
+          // Keep going: one bad object shouldn't hide what was already created.
+          failures.push({ type, id: oldId, error: (err as Error).message });
+          return null;
+        }
         const data = resp.data as { id?: string };
         if (data.id) {
           created++;
@@ -257,8 +267,10 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
       for (const c of snap.creatives) {
         const body = pick(c, CREATIVE_CREATE);
         if (!body.name) body.name = `Restored creative ${c.id}`;
-        const newId = await create(`${accountId}/adcreatives`, body);
+        const failedBefore = failures.length;
+        const newId = await create(`${accountId}/adcreatives`, body, 'creative', c.id);
         if (newId) creativeMap[c.id] = newId;
+        else if (failures.length > failedBefore) failedCreatives.add(c.id);
         else warnings.push(`Creative ${c.id} did not return an ID.`);
       }
 
@@ -267,9 +279,10 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
         const body = pick(camp, CAMPAIGN_CREATE);
         body.status = status;
         if (!body.special_ad_categories) body.special_ad_categories = JSON.stringify(['NONE']);
-        const newId = await create(`${accountId}/campaigns`, body);
+        const failedBefore = failures.length;
+        const newId = await create(`${accountId}/campaigns`, body, 'campaign', camp.id);
         if (newId) campaignMap[camp.id] = newId;
-        else warnings.push(`Campaign ${camp.id} (${String(camp.name)}) did not return an ID.`);
+        else if (failures.length === failedBefore) warnings.push(`Campaign ${camp.id} (${String(camp.name)}) did not return an ID.`);
       }
 
       // 3. Ad sets — remap campaign_id.
@@ -283,9 +296,10 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
           continue;
         }
         body.campaign_id = newCamp;
-        const newId = await create(`${accountId}/adsets`, body);
+        const failedBefore = failures.length;
+        const newId = await create(`${accountId}/adsets`, body, 'adset', adset.id);
         if (newId) adsetMap[adset.id] = newId;
-        else warnings.push(`Ad set ${adset.id} (${String(adset.name)}) did not return an ID.`);
+        else if (failures.length === failedBefore) warnings.push(`Ad set ${adset.id} (${String(adset.name)}) did not return an ID.`);
       }
 
       // 4. Ads — remap adset_id + creative.
@@ -306,10 +320,13 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
         } else if (oldCreative) {
           // Fall back to referencing the original creative ID (may still be valid).
           body.creative = JSON.stringify({ creative_id: oldCreative });
-          warnings.push(`Ad ${ad.id}: creative ${oldCreative} not in snapshot — referencing original ID.`);
+          warnings.push(failedCreatives.has(oldCreative)
+            ? `Ad ${ad.id}: creative ${oldCreative} failed to restore — referencing original ID.`
+            : `Ad ${ad.id}: creative ${oldCreative} not in snapshot — referencing original ID.`);
         }
-        const newId = await create(`${accountId}/ads`, body);
-        if (!newId) warnings.push(`Ad ${ad.id} (${String(ad.name)}) did not return an ID.`);
+        const failedBefore = failures.length;
+        const newId = await create(`${accountId}/ads`, body, 'ad', ad.id);
+        if (!newId && failures.length === failedBefore) warnings.push(`Ad ${ad.id} (${String(ad.name)}) did not return an ID.`);
       }
 
       console.log(formatOutput({
@@ -322,7 +339,13 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
           adsets: adsetMap,
           creatives: creativeMap,
         },
+        failed_objects: failures.length,
+        failures,
         warnings,
       }, opts.output as OutputFormat));
+      if (failures.length > 0) {
+        console.error(`Restore finished with ${failures.length} failure(s); see "failures". Objects in id_map were created.`);
+        process.exitCode = 1;
+      }
     }));
 }

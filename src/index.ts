@@ -40,6 +40,8 @@ import { registerSetupCommand } from './commands/setup.js';
 import { registerProfileCommands } from './commands/profile.js';
 import { registerDoctorCommand } from './commands/doctor.js';
 import { applyProfile } from './profiles.js';
+import { parseCents, validateAccountId } from './validate.js';
+import { API_VERSION } from './meta-client.js';
 import logger from './logger.js';
 
 const program = new Command();
@@ -51,36 +53,42 @@ program
   .option('--dry-run', 'Preview the API request without executing it')
   .option('--read-only', 'Restrict to read-only operations (block POST/DELETE)')
   .option('--max-spend-cap <cents>', 'Block any write whose budget field (daily/lifetime/spend_cap/bid) exceeds this many cents')
-  .option('--api-version <version>', 'Graph API version (default: v25.0)', 'v25.0')
+  .option('--api-version <version>', `Graph API version (default: ${API_VERSION})`)
   .option('--profile <name>', 'Use a named profile for credentials and account');
 
-// Apply profile before anything else (sets env vars)
-const profileIdx = process.argv.indexOf('--profile');
-if (profileIdx !== -1 && process.argv[profileIdx + 1]) {
-  applyProfile(process.argv[profileIdx + 1]);
+/**
+ * Read a global option's value from argv before Commander parses it.
+ * Handles both `--name value` and `--name=value`, and stops at `--`.
+ */
+function readArgvOption(name: string): string | undefined {
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === '--') break;
+    if (arg === name) return args[i + 1];
+    if (arg.startsWith(`${name}=`)) return arg.slice(name.length + 1);
+  }
+  return undefined;
 }
 
-// Determine flags from env or argv
-const dryRun = process.argv.includes('--dry-run');
-const readOnly = process.argv.includes('--read-only');
+// Apply the profile before command registration, because option defaults
+// (e.g. --account-id) read the env vars it sets.
+const profileName = readArgvOption('--profile');
+if (profileName) {
+  try {
+    applyProfile(profileName);
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
+}
 
-// Extract --max-spend-cap value (cents); falls back to env in MetaClient.
+// Global flags are resolved from Commander in the preAction hook, before any
+// action can construct the client.
+let dryRun = false;
+let readOnly = false;
 let maxSpendCapCents = 0;
-const capIdx = process.argv.indexOf('--max-spend-cap');
-if (capIdx !== -1 && process.argv[capIdx + 1]) {
-  const parsed = Number(process.argv[capIdx + 1]);
-  if (Number.isFinite(parsed) && parsed >= 0) maxSpendCapCents = parsed;
-}
-
-// Extract --api-version value
-let apiVersion = 'v25.0';
-const apiIdx = process.argv.indexOf('--api-version');
-if (apiIdx !== -1 && process.argv[apiIdx + 1]) {
-  apiVersion = process.argv[apiIdx + 1];
-}
-if (process.env.META_ADS_CLI_API_VERSION) {
-  apiVersion = process.env.META_ADS_CLI_API_VERSION;
-}
+let apiVersion = process.env.META_ADS_CLI_API_VERSION || API_VERSION;
 
 // Lazy-initialized singletons
 let authManager: AuthManager | null = null;
@@ -88,7 +96,7 @@ let metaClient: MetaClient | null = null;
 
 function getAuth(): AuthManager {
   if (!authManager) {
-    authManager = new AuthManager();
+    authManager = new AuthManager(apiVersion);
   }
   return authManager;
 }
@@ -169,9 +177,24 @@ registerSetupCommand(program, getAuth);
 registerDoctorCommand(program, getAuth, getClient);
 
 // Ensure auth is initialized before non-auth commands
-program.hook('preAction', async (thisCommand) => {
+program.hook('preAction', async (_root, actionCommand) => {
+  const globals = program.opts();
+  dryRun = Boolean(globals.dryRun);
+  readOnly = Boolean(globals.readOnly);
+  if (globals.apiVersion) apiVersion = globals.apiVersion;
+  maxSpendCapCents = parseCents(globals.maxSpendCap, '--max-spend-cap') ?? 0;
+
+  // Normalize --account-id to the act_ form and reject anything else, so a
+  // bad value can't be spliced into the request path.
+  const accountId = actionCommand.getOptionValue('accountId');
+  if (typeof accountId === 'string' && accountId) {
+    actionCommand.setOptionValue('accountId', validateAccountId(accountId));
+  }
+
+  // The hook is attached to the root program, so walk up from the command
+  // that is actually running.
   const commandChain: string[] = [];
-  let cmd: Command | null = thisCommand;
+  let cmd: Command | null = actionCommand;
   while (cmd) {
     commandChain.unshift(cmd.name());
     cmd = cmd.parent;
@@ -179,7 +202,7 @@ program.hook('preAction', async (thisCommand) => {
 
   // Skip auth initialization for auth/setup/schema/generate-skills commands and dry-run
   const skipAuth = ['auth', 'setup', 'schema', 'generate-skills', 'profile', 'doctor'];
-  if (skipAuth.some(s => commandChain.includes(s))) return;
+  if (skipAuth.includes(commandChain[1])) return;
   if (dryRun) return;
 
   logger.info(`Running: meta-ads ${commandChain.slice(1).join(' ')}`);

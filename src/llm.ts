@@ -126,6 +126,7 @@ class OpenAICompatibleProvider implements LlmProvider {
     logger.info(`LLM(openai-compatible) model=${this.model} base=${this.baseUrl} maxTokens=${maxTokens}`);
     const resp = await fetch(`${this.baseUrl}/chat/completions`, {
       method: 'POST',
+      signal: AbortSignal.timeout(Number(process.env.META_ADS_CLI_LLM_TIMEOUT_MS) || 300_000),
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${this.apiKey}`,
@@ -203,33 +204,45 @@ class ClaudeCliProvider implements LlmProvider {
       + `Respond with ONLY a single JSON object that conforms to this JSON Schema. `
       + `No markdown, no code fences, no prose:\n${JSON.stringify(opts.schema)}`;
 
+    const timeoutMs = Number(process.env.META_ADS_CLI_CLAUDE_TIMEOUT_MS) || 300_000;
     const stdout = await new Promise<string>((resolve, reject) => {
+      // The prompt goes in on stdin: large accounts overflow the argv limit.
       const child = spawn(this.bin, [
-        '-p', prompt,
+        '-p',
         '--model', this.model,
         '--output-format', 'json',
-      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`claude CLI timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }, timeoutMs);
 
       let out = '';
       let err = '';
       child.stdout.on('data', (d) => { out += d; });
       child.stderr.on('data', (d) => { err += d; });
-      child.on('error', reject);
+      child.on('error', (e) => { clearTimeout(timer); reject(e); });
       child.on('close', (code) => {
+        clearTimeout(timer);
         if (code === 0) resolve(out);
         else reject(new Error(`claude CLI exited ${code}: ${err.slice(0, 300)}`));
       });
+      child.stdin.on('error', () => { /* surfaced via close/exit code */ });
+      child.stdin.end(prompt);
     });
 
     // --output-format json wraps the reply: { result: "<text>", ... }
-    let text: string;
+    let envelope: { result?: string; is_error?: boolean } | undefined;
     try {
-      const envelope = JSON.parse(stdout) as { result?: string; is_error?: boolean };
-      if (envelope.is_error) throw new Error('claude CLI reported an error result.');
-      text = (envelope.result ?? '').trim();
+      envelope = JSON.parse(stdout);
     } catch {
-      text = stdout.trim(); // fall back to raw stdout if envelope parsing fails
+      envelope = undefined; // fall back to raw stdout if envelope parsing fails
     }
+    if (envelope?.is_error) {
+      throw new Error(`claude CLI reported an error: ${String(envelope.result ?? '').slice(0, 300)}`);
+    }
+    const text = envelope ? String(envelope.result ?? '').trim() : stdout.trim();
 
     // The model may still wrap JSON in ```fences``` — strip them.
     const fenced = /```(?:json)?\s*([\s\S]*?)\s*```/.exec(text);
@@ -281,6 +294,8 @@ export function getProvider(): LlmProvider {
   cached = name === 'anthropic' ? new AnthropicProvider()
     : name === 'openai-compatible' ? new OpenAICompatibleProvider()
       : new ClaudeCliProvider();
+  // Account data is about to leave the machine; say where it's going.
+  console.error(`Sending account data to LLM provider: ${llmProviderLabel()}`);
   return cached;
 }
 

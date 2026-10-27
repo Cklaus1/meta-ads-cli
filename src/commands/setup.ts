@@ -3,9 +3,46 @@ import { AuthManager } from '../auth.js';
 import readline from 'readline';
 import fs from 'fs';
 import path from 'path';
+import { handleErrors } from '../errors.js';
+import { writePrivateFile } from '../private-file.js';
 
 function prompt(rl: readline.Interface, question: string): Promise<string> {
-  return new Promise(resolve => rl.question(question, resolve));
+  return new Promise((resolve, reject) => {
+    // Without this, EOF on stdin leaves the promise pending and the process
+    // exits 0 halfway through the wizard.
+    const onClose = () => reject(new Error('Setup cancelled (input closed)'));
+    rl.once('close', onClose);
+    rl.question(question, answer => {
+      rl.off('close', onClose);
+      resolve(answer.trim());
+    });
+  });
+}
+
+/**
+ * Set keys in .env content, replacing existing lines for those keys in place
+ * and appending the rest. Every other line is kept as-is.
+ */
+export function upsertEnv(content: string, values: Record<string, string>): string {
+  const remaining = new Map(Object.entries(values));
+  const lines = content ? content.replace(/\n$/, '').split('\n') : [];
+  const out = lines.map(line => {
+    const key = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/)?.[1];
+    if (key && remaining.has(key)) {
+      const value = remaining.get(key)!;
+      remaining.delete(key);
+      return `${key}=${value}`;
+    }
+    return line;
+  });
+  if (remaining.size > 0) {
+    if (!out.some(l => l.trim() === '# Meta Ads CLI Configuration')) {
+      if (out.length && out[out.length - 1].trim() !== '') out.push('');
+      out.push('# Meta Ads CLI Configuration');
+    }
+    for (const [key, value] of remaining) out.push(`${key}=${value}`);
+  }
+  return out.join('\n') + '\n';
 }
 
 export function registerSetupCommand(program: Command, getAuth: () => AuthManager): void {
@@ -13,7 +50,7 @@ export function registerSetupCommand(program: Command, getAuth: () => AuthManage
     .command('setup')
     .description('Interactive setup wizard for Meta Ads CLI')
     .option('--non-interactive', 'Print instructions without prompts')
-    .action(async (opts) => {
+    .action(handleErrors(async (opts) => {
       if (opts.nonInteractive) {
         printStaticInstructions();
         return;
@@ -46,7 +83,7 @@ export function registerSetupCommand(program: Command, getAuth: () => AuthManage
       console.log('  Add the "Marketing API" product to your app\n');
 
       const appId = await prompt(rl, `  Meta App ID ${existingAppId ? `(${existingAppId})` : ''}: `);
-      const appSecret = await prompt(rl, '  Meta App Secret (for long-lived tokens, optional): ');
+      const appSecret = await prompt(rl, '  Meta App Secret (for long-lived tokens, optional; blank keeps the current one): ');
 
       // Step 3: Default account
       console.log('\nStep 3: Default ad account');
@@ -56,25 +93,17 @@ export function registerSetupCommand(program: Command, getAuth: () => AuthManage
       // Step 4: Save to .env
       console.log('\nStep 4: Saving configuration...');
       const envPath = path.resolve('.env');
-      const envLines: string[] = [];
+      const existing = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
 
-      if (fs.existsSync(envPath)) {
-        const existing = fs.readFileSync(envPath, 'utf8');
-        // Remove existing META_ADS_CLI_ lines
-        for (const line of existing.split('\n')) {
-          if (!line.startsWith('META_ADS_CLI_') && !line.startsWith('META_APP_') && !line.startsWith('META_ACCESS_TOKEN')) {
-            envLines.push(line);
-          }
-        }
-      }
+      // Only touch the keys the wizard asked about; blank answers keep the
+      // current value, and every other setting (token, spend cap, ...) stays.
+      const updates: Record<string, string> = {};
+      if (appId || existingAppId) updates.META_ADS_CLI_APP_ID = appId || existingAppId || '';
+      if (appSecret) updates.META_ADS_CLI_APP_SECRET = appSecret;
+      if (accountId) updates.META_ADS_CLI_ACCOUNT_ID = accountId;
+      else if (existingAccount) updates.META_ADS_CLI_ACCOUNT_ID = existingAccount;
 
-      envLines.push('');
-      envLines.push('# Meta Ads CLI Configuration');
-      envLines.push(`META_ADS_CLI_APP_ID=${appId || existingAppId || ''}`);
-      if (appSecret) envLines.push(`META_ADS_CLI_APP_SECRET=${appSecret}`);
-      if (accountId || existingAccount) envLines.push(`META_ADS_CLI_ACCOUNT_ID=${accountId || existingAccount || ''}`);
-
-      fs.writeFileSync(envPath, envLines.join('\n').trim() + '\n');
+      writePrivateFile(envPath, upsertEnv(existing, updates));
       console.log(`  Saved to ${envPath}`);
 
       // Step 5: Test (if we have a token)
@@ -104,7 +133,7 @@ export function registerSetupCommand(program: Command, getAuth: () => AuthManage
       console.log('  4. meta-ads campaigns list    (list campaigns)\n');
 
       rl.close();
-    });
+    }));
 }
 
 function printStaticInstructions(): void {

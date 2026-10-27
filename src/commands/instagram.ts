@@ -8,6 +8,31 @@ function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
 
+/**
+ * Poll a media container until it is ready to publish. Throws on ERROR or
+ * EXPIRED, and on timeout, so a container is never published half-processed.
+ */
+export async function waitForContainer(
+  client: MetaClient,
+  containerId: string,
+  { intervalMs = 5000, maxAttempts = 60 }: { intervalMs?: number; maxAttempts?: number } = {},
+): Promise<void> {
+  if (client.isDryRun()) return;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const statusResponse = await client.request(containerId, {
+      params: { fields: 'status_code,status' },
+    });
+    const data = statusResponse.data as Record<string, unknown>;
+    const status = String(data.status_code || '');
+    if (status === 'FINISHED' || status === 'PUBLISHED') return;
+    if (status === 'ERROR' || status === 'EXPIRED') {
+      throw new Error(`Media container ${containerId} failed processing (${status})${data.status ? `: ${data.status}` : ''}`);
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+  throw new Error(`Media container ${containerId} was still processing after ${Math.round(maxAttempts * intervalMs / 1000)}s. Not publishing.`);
+}
+
 export function registerInstagramCommands(program: Command, getClient: () => MetaClient): void {
   const instagram = program.command('instagram').alias('ig').description('Instagram Shopping and business profile management');
 
@@ -155,19 +180,7 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
       // Step 2: For videos, wait for processing
       if (opts.videoUrl) {
         console.error('Video uploaded, waiting for processing...');
-        let status = 'IN_PROGRESS';
-        let attempts = 0;
-        while (status === 'IN_PROGRESS' && attempts < 30) {
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          const statusResponse = await client.request(containerId, {
-            params: { fields: 'status_code' },
-          });
-          status = (statusResponse.data as Record<string, unknown>).status_code as string;
-          attempts++;
-          if (status === 'ERROR') {
-            throw new Error('Video processing failed');
-          }
-        }
+        await waitForContainer(client, containerId);
       }
 
       // Step 3: Publish
@@ -211,7 +224,13 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
           method: 'POST',
           body: childBody,
         });
-        childIds.push((childResponse.data as Record<string, unknown>).id as string);
+        const childId = (childResponse.data as Record<string, unknown>).id as string;
+        childIds.push(childId);
+        // Video children must finish processing before the carousel is created
+        if (item.video_url) {
+          console.error(`Carousel video ${childIds.length} uploaded, waiting for processing...`);
+          await waitForContainer(client, childId);
+        }
       }
 
       // Step 2: Create carousel container
@@ -264,19 +283,9 @@ export function registerInstagramCommands(program: Command, getClient: () => Met
 
       const containerId = (containerResponse.data as Record<string, unknown>).id as string;
 
-      // Wait briefly for processing
       if (opts.videoUrl) {
         console.error('Video uploaded, waiting for processing...');
-        let status = 'IN_PROGRESS';
-        let attempts = 0;
-        while (status === 'IN_PROGRESS' && attempts < 30) {
-          await new Promise(resolve => setTimeout(resolve, 5000));
-          const statusResponse = await client.request(containerId, {
-            params: { fields: 'status_code' },
-          });
-          status = (statusResponse.data as Record<string, unknown>).status_code as string;
-          attempts++;
-        }
+        await waitForContainer(client, containerId);
       }
 
       const publishResponse = await client.request(`${instagramId}/media_publish`, {

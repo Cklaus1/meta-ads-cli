@@ -1,6 +1,7 @@
 import { AuthManager } from './auth.js';
 import { detectMimeType } from './mime.js';
 import logger from './logger.js';
+import { parseCents, validateEndpoint } from './validate.js';
 
 const MAX_RETRIES = 3;
 const MAX_PAGES = 100;
@@ -14,11 +15,19 @@ const USAGE_SOFT_THRESHOLD = Number(process.env.META_ADS_CLI_USAGE_THRESHOLD) ||
 const RATE_LIMIT_CODES = new Set([4, 17, 32, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006, 80008, 80014]);
 // Cap how long we'll auto-wait on a throttle that reports a recovery estimate.
 const MAX_AUTO_WAIT_MS = Number(process.env.META_ADS_CLI_MAX_WAIT_MS) || 90_000;
+// Per-request HTTP timeout so a stalled connection can't hang the CLI forever.
+const HTTP_TIMEOUT_MS = Number(process.env.META_ADS_CLI_HTTP_TIMEOUT_MS) || 60_000;
+const UPLOAD_TIMEOUT_MS = Number(process.env.META_ADS_CLI_UPLOAD_TIMEOUT_MS) || 600_000;
+export const THREADS_BASE_URL = 'https://graph.threads.net/v1.0';
 
 export interface MetaRequestOptions {
   method?: string;
   params?: Record<string, string>;
   body?: Record<string, string>;
+  /** Use this token instead of the user token (e.g. a Page access token). */
+  accessToken?: string;
+  /** Override the API base URL (e.g. THREADS_BASE_URL). */
+  baseUrl?: string;
 }
 
 export interface MetaResponse {
@@ -85,7 +94,14 @@ export function parseUsageHeaders(headers: Headers | undefined): UsageSnapshot {
 
 // Budget-bearing fields (all in cents) that a write request could set. If any
 // exceeds the configured cap, the write is blocked before it leaves the client.
-const BUDGET_FIELDS = ['daily_budget', 'lifetime_budget', 'spend_cap', 'bid_amount'] as const;
+const BUDGET_FIELDS = [
+  'daily_budget', 'lifetime_budget', 'spend_cap', 'bid_amount', 'bid_cap',
+  'daily_spend_cap', 'lifetime_spend_cap', 'daily_min_spend_target', 'lifetime_min_spend_target',
+  'budget', 'budget_value',
+] as const;
+
+/** Methods that are safe to retry after a 5xx or network error. */
+const IDEMPOTENT_METHODS = new Set(['GET', 'DELETE']);
 
 export class MetaClient {
   private auth: AuthManager;
@@ -104,27 +120,43 @@ export class MetaClient {
     this.readOnly = readOnly;
     this.apiVersion = apiVersion || process.env.META_ADS_CLI_API_VERSION || API_VERSION;
     this.baseUrl = `https://graph.facebook.com/${this.apiVersion}`;
-    const envCap = Number(process.env.META_ADS_CLI_MAX_SPEND_CAP);
-    this.maxSpendCapCents = maxSpendCapCents || (Number.isFinite(envCap) ? envCap : 0);
+    // The strictest configured cap wins: a flag can lower the env/profile cap
+    // but never raise it.
+    const envCap = parseCents(process.env.META_ADS_CLI_MAX_SPEND_CAP, 'META_ADS_CLI_MAX_SPEND_CAP');
+    const caps = [maxSpendCapCents, envCap].filter((c): c is number => c !== undefined && c > 0);
+    this.maxSpendCapCents = caps.length ? Math.min(...caps) : 0;
   }
 
   /**
-   * Enforce the spend-cap guard against a write body. Throws if any budget
-   * field exceeds the configured ceiling. No-op when no cap is set.
+   * Enforce the spend-cap guard against the fields of a write. Throws if any
+   * budget field exceeds the configured ceiling or isn't a plain number of
+   * cents. No-op when no cap is set.
    */
-  private enforceSpendCap(body: Record<string, string> | undefined): void {
-    if (!this.maxSpendCapCents || !body) return;
+  private enforceSpendCap(fields: Record<string, string> | undefined): void {
+    if (!this.maxSpendCapCents || !fields) return;
     for (const field of BUDGET_FIELDS) {
-      const raw = body[field];
+      const raw = fields[field];
       if (raw === undefined) continue;
-      const cents = Number(raw);
-      if (Number.isFinite(cents) && cents > this.maxSpendCapCents) {
+      // A MULTIPLIER budget schedule is a percentage, not an amount.
+      if (field === 'budget_value' && fields.budget_value_type === 'MULTIPLIER') continue;
+      const str = String(raw).trim();
+      if (!/^\d+(\.\d+)?$/.test(str)) {
+        throw new Error(`Spend-cap guard: ${field}="${raw}" is not a number of cents, so it can't be checked against the cap.`);
+      }
+      const cents = Number(str);
+      if (cents > this.maxSpendCapCents) {
         throw new Error(
           `Spend-cap guard: ${field}=${cents}¢ ($${(cents / 100).toFixed(2)}) exceeds the `
-          + `--max-spend-cap of ${this.maxSpendCapCents}¢ ($${(this.maxSpendCapCents / 100).toFixed(2)}). `
-          + 'Raise --max-spend-cap / META_ADS_CLI_MAX_SPEND_CAP, or lower the budget.',
+          + `spend cap of ${this.maxSpendCapCents}¢ ($${(this.maxSpendCapCents / 100).toFixed(2)}). `
+          + 'Lower the budget, or ask the account owner to change the cap.',
         );
       }
+    }
+  }
+
+  private assertWritable(method: string): void {
+    if (this.readOnly && method !== 'GET') {
+      throw new Error(`Read-only mode: ${method} requests are blocked. Remove --read-only to allow writes.`);
     }
   }
 
@@ -138,13 +170,36 @@ export class MetaClient {
     return this.maxSpendCapCents;
   }
 
-  /** Expose the latest usage reading (for diagnostics / doctor). */
-  getUsage(): UsageSnapshot {
-    return this.lastUsage;
+  isDryRun(): boolean {
+    return this.dryRun;
   }
 
-  buildUrl(endpoint: string, params?: Record<string, string>): string {
-    let url = `${this.baseUrl}/${endpoint}`;
+  getApiVersion(): string {
+    return this.apiVersion;
+  }
+
+  private pageTokens = new Map<string, string>();
+
+  /**
+   * Fetch (and cache) the Page access token for a Page the user manages.
+   * Page writes and Messenger calls need it; the user token is rejected.
+   * In dry-run mode the user token is returned without a request.
+   */
+  async getPageToken(pageId: string): Promise<string | undefined> {
+    if (this.dryRun) return undefined;
+    const cached = this.pageTokens.get(pageId);
+    if (cached) return cached;
+    const response = await this.request(pageId, { params: { fields: 'access_token' } });
+    const token = (response.data as { access_token?: string }).access_token;
+    if (!token) {
+      throw new Error(`Could not get a Page access token for ${pageId}. Check that you manage this Page and granted pages_show_list.`);
+    }
+    this.pageTokens.set(pageId, token);
+    return token;
+  }
+
+  buildUrl(endpoint: string, params?: Record<string, string>, baseUrl = this.baseUrl): string {
+    let url = `${baseUrl}/${validateEndpoint(endpoint)}`;
     if (params && Object.keys(params).length > 0) {
       const qs = Object.entries(params)
         .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
@@ -156,18 +211,20 @@ export class MetaClient {
 
   async request(endpoint: string, options: MetaRequestOptions = {}): Promise<MetaResponse> {
     const method = options.method || 'GET';
+    const baseUrl = options.baseUrl || this.baseUrl;
+    validateEndpoint(endpoint);
 
-    if (this.readOnly && method !== 'GET') {
-      throw new Error(`Read-only mode: ${method} requests are blocked. Remove --read-only to allow writes.`);
-    }
+    this.assertWritable(method);
 
-    // Budget guard: validate before dry-run too, so the limit is caught while previewing.
-    if (method === 'POST') {
+    // Budget guard: validate before dry-run too, so the limit is caught while
+    // previewing. Graph API reads query params on writes too, so check both.
+    if (method !== 'GET') {
       this.enforceSpendCap(options.body);
+      this.enforceSpendCap(options.params);
     }
 
     if (this.dryRun) {
-      const url = this.buildUrl(endpoint, options.params);
+      const url = this.buildUrl(endpoint, options.params, baseUrl);
       console.log(`[dry-run] ${method} ${url}`);
       if (options.body) {
         console.log(`[dry-run] Body: ${JSON.stringify(options.body)}`);
@@ -175,7 +232,7 @@ export class MetaClient {
       return { data: { dryRun: true, method, endpoint }, status: 0 };
     }
 
-    const token = await this.auth.getToken();
+    const token = options.accessToken || await this.auth.getToken();
 
     // Build params with access_token
     const allParams: Record<string, string> = {
@@ -197,24 +254,41 @@ export class MetaClient {
       await sleep(waitMs);
     }
 
+    // Creates are not idempotent: Meta can commit a POST and still return a
+    // 5xx or drop the connection, so retrying would duplicate the object.
+    const canRetryFailure = IDEMPOTENT_METHODS.has(method);
+
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       let response: Response;
 
-      if (method === 'GET' || method === 'DELETE') {
-        const url = this.buildUrl(endpoint, allParams);
-        response = await fetch(url, { method });
-      } else {
-        // POST — Meta API uses form data for POST
-        const url = this.buildUrl(endpoint);
-        const formBody = new URLSearchParams({
-          ...allParams,
-          ...options.body,
-        });
-        response = await fetch(url, {
-          method,
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: formBody.toString(),
-        });
+      try {
+        if (method === 'GET' || method === 'DELETE') {
+          const url = this.buildUrl(endpoint, allParams, baseUrl);
+          response = await fetch(url, { method, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) });
+        } else {
+          // POST — Meta API uses form data for POST
+          const url = this.buildUrl(endpoint, undefined, baseUrl);
+          const formBody = new URLSearchParams({
+            ...allParams,
+            ...options.body,
+          });
+          response = await fetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: formBody.toString(),
+            signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+          });
+        }
+      } catch (err) {
+        lastError = networkError(err, HTTP_TIMEOUT_MS);
+        if (canRetryFailure && attempt < MAX_RETRIES - 1) {
+          const waitMs = Math.pow(2, attempt) * 1000;
+          logger.warn(`${lastError.message}. Retrying in ${waitMs / 1000}s...`);
+          console.error(`${lastError.message}. Retrying in ${waitMs / 1000}s...`);
+          await sleep(waitMs);
+          continue;
+        }
+        throw lastError;
       }
 
       logger.debug(`Response: ${response.status} ${response.statusText}`, { attempt });
@@ -236,8 +310,8 @@ export class MetaClient {
         }
       }
 
-      // Server error — retry with backoff
-      if (response.status >= 500 && attempt < MAX_RETRIES - 1) {
+      // Server error — retry with backoff (idempotent methods only)
+      if (response.status >= 500 && canRetryFailure && attempt < MAX_RETRIES - 1) {
         const waitMs = Math.pow(2, attempt) * 1000;
         logger.warn(`Server error (${response.status}). Retrying in ${waitMs / 1000}s...`);
         console.error(`Server error (${response.status}). Retrying in ${waitMs / 1000}s...`);
@@ -269,10 +343,9 @@ export class MetaClient {
         // code — NOT 429. Honor Meta's own recovery estimate when present,
         // otherwise back off exponentially, and retry within the attempt budget.
         if (RATE_LIMIT_CODES.has(errorCode)) {
-          const estMs = this.lastUsage.estimatedRecoverSec
+          const waitMs = this.lastUsage.estimatedRecoverSec
             ? this.lastUsage.estimatedRecoverSec * 1000
             : Math.pow(2, attempt) * 2000;
-          const waitMs = Math.min(MAX_AUTO_WAIT_MS, estMs);
           if (attempt < MAX_RETRIES - 1 && waitMs <= MAX_AUTO_WAIT_MS) {
             const est = this.lastUsage.estimatedRecoverSec;
             logger.warn(`Rate limited (code ${errorCode}). Waiting ${(waitMs / 1000).toFixed(0)}s${est ? ` (Meta estimate: ${Math.round(est / 60)}m)` : ''}.`);
@@ -302,9 +375,10 @@ export class MetaClient {
       }
 
       // Extract pagination cursor
+      // (Meta signals the last page by omitting paging.next.)
       const paging = obj.paging as Record<string, unknown> | undefined;
       const cursors = paging?.cursors as Record<string, string> | undefined;
-      const nextCursor = cursors?.after || undefined;
+      const nextCursor = paging?.next ? cursors?.after || undefined : undefined;
 
       return { data: json, status: response.status, nextCursor };
     }
@@ -357,19 +431,26 @@ export class MetaClient {
 
     logger.info(`Paginated: ${allItems.length} items across ${pageCount} pages`);
     data.data = allItems;
+    // The first page's cursors are stale once everything is merged.
+    delete data.paging;
     return { data, status: first.status };
   }
 
   /**
-   * Upload a file (image or video) via multipart form data.
-   * For videos > 25MB, uses resumable upload with chunked streaming.
+   * Upload a file (image or video) as multipart form data. Extra form fields
+   * (e.g. title, description) are sent alongside the file.
    */
   async uploadFile(
     endpoint: string,
     filePath: string,
+    fields: Record<string, string> = {},
+    options: Pick<MetaRequestOptions, 'accessToken'> = {},
   ): Promise<MetaResponse> {
-    const { readFileSync, statSync } = await import('fs');
-    const stat = statSync(filePath);
+    validateEndpoint(endpoint);
+    this.assertWritable('POST');
+
+    const fs = await import('fs');
+    const stat = fs.statSync(filePath);
     const fileSize = stat.size;
     const contentType = detectMimeType(filePath);
 
@@ -378,38 +459,33 @@ export class MetaClient {
     if (this.dryRun) {
       console.log(`[dry-run] POST ${this.baseUrl}/${endpoint}`);
       console.log(`[dry-run] File: ${filePath} (${fileSize} bytes, ${contentType})`);
+      if (Object.keys(fields).length) console.log(`[dry-run] Fields: ${JSON.stringify(fields)}`);
       return { data: { dryRun: true, method: 'POST', fileSize, contentType }, status: 0 };
     }
 
-    const token = await this.auth.getToken();
-    const content = readFileSync(filePath);
+    const token = options.accessToken || await this.auth.getToken();
+    // Node 20+ can stream the file from disk; older versions read it into memory.
+    const openAsBlob = (fs as unknown as { openAsBlob?: (p: string, o?: { type?: string }) => Promise<Blob> }).openAsBlob;
+    const blob = openAsBlob
+      ? await openAsBlob(filePath, { type: contentType })
+      : new Blob([fs.readFileSync(filePath)], { type: contentType });
 
-    // Build multipart form data manually
-    const boundary = `----MetaAdsCLI${Date.now()}`;
-    const parts: Buffer[] = [];
-
-    // Access token part
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="access_token"\r\n\r\n${token}\r\n`));
-
-    // File part
-    const filename = filePath.split('/').pop() || 'file';
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="source"; filename="${filename}"\r\nContent-Type: ${contentType}\r\n\r\n`));
-    parts.push(content);
-    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
-
-    const body = Buffer.concat(parts);
+    // FormData handles boundary generation and filename escaping.
+    const form = new FormData();
+    form.append('access_token', token);
+    for (const [k, v] of Object.entries(fields)) form.append(k, v);
+    const filename = filePath.split(/[\\/]/).pop() || 'file';
+    form.append('source', blob, filename);
 
     const url = `${this.baseUrl}/${endpoint}`;
     console.error(`Uploading ${filename} (${(fileSize / 1024 / 1024).toFixed(1)} MB)...`);
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        'Content-Length': String(body.byteLength),
-      },
-      body,
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, { method: 'POST', body: form, signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS) });
+    } catch (err) {
+      throw networkError(err, UPLOAD_TIMEOUT_MS);
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -424,6 +500,16 @@ export class MetaClient {
       return { data: { message: 'Upload complete', size: fileSize }, status: response.status };
     }
   }
+}
+
+/** Turn a fetch rejection (timeout, DNS, reset) into a readable error. */
+function networkError(err: unknown, timeoutMs: number): Error {
+  const e = err as Error & { cause?: { code?: string } };
+  if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+    return new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s`);
+  }
+  const code = e?.cause?.code ? ` (${e.cause.code})` : '';
+  return new Error(`Network error${code}: ${e?.message || String(err)}`);
 }
 
 function sleep(ms: number): Promise<void> {
