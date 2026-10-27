@@ -1,5 +1,8 @@
 import { Command } from 'commander';
+import fs from 'fs';
 import { handleErrors } from '../errors.js';
+import { upsertEnv } from './setup.js';
+import { writePrivateFile } from '../private-file.js';
 import { AuthManager, authScope } from '../auth.js';
 
 export function registerAuthCommands(program: Command, getAuth: () => AuthManager): void {
@@ -88,7 +91,13 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
     .command('refresh-token')
     .description('Exchange the current token for a long-lived one and cache it')
     .option('--print', 'Also print the full new token to stdout (for piping)')
+    .option('--update-env <file>', 'Verify the new token and write it to META_ADS_CLI_ACCESS_TOKEN in this .env file (for scheduled refresh)')
+    .option('--warn-days <n>', 'With --update-env: exit 2 when the token expires within this many days and the refresh did not extend it', '14')
     .action(handleErrors(async (opts) => {
+      if (opts.updateEnv) {
+        await refreshIntoEnvFile(getAuth(), opts.updateEnv, Number(opts.warnDays));
+        return;
+      }
       const authManager = getAuth();
       await authManager.initialize();
       try {
@@ -120,4 +129,48 @@ export function registerAuthCommands(program: Command, getAuth: () => AuthManage
         process.exit(1);
       }
     }));
+}
+
+/**
+ * Scheduled refresh: exchange the token in an .env file for a new long-lived
+ * one, check that it works and doesn't expire sooner than the current one,
+ * then rewrite only that line. Prints one status line; never prints tokens.
+ */
+export async function refreshIntoEnvFile(authManager: AuthManager, envFile: string, warnDays: number): Promise<void> {
+  const stamp = new Date().toISOString();
+  const fail = (msg: string, code = 1): never => {
+    console.error(`${stamp} token refresh FAILED: ${msg}`);
+    process.exit(code);
+  };
+  if (!fs.existsSync(envFile)) fail(`${envFile} not found`);
+  const content = fs.readFileSync(envFile, 'utf8');
+  const current = /^META_ADS_CLI_ACCESS_TOKEN=(.*)$/m.exec(content)?.[1]?.trim().replace(/^["']|["']$/g, '');
+  if (!current) fail(`no META_ADS_CLI_ACCESS_TOKEN line in ${envFile}`);
+  if (!authManager.getAppSecret()) fail('META_ADS_CLI_APP_SECRET is required');
+
+  const before = await authManager.inspectToken(current!).catch(err => fail((err as Error).message));
+  if (!before.isValid) fail('the current token is no longer valid; get a new one (meta-ads auth login or Graph API Explorer)');
+
+  const exchanged = await authManager.exchangeForLongLivedToken(current!).catch(err => fail((err as Error).message));
+  if (!exchanged) fail('Meta did not return a new token');
+  const after = await authManager.inspectToken(exchanged!.accessToken).catch(err => fail((err as Error).message));
+  if (!after.isValid) fail('the new token is not valid; .env left unchanged');
+  if (after.userId && before.userId && after.userId !== before.userId) fail('the new token belongs to a different user; .env left unchanged');
+
+  const days = (exp?: number) => (exp ? Math.round((exp * 1000 - Date.now()) / 86400000) : Infinity);
+  const beforeExp = before.expiresAt || 0;
+  const afterExp = after.expiresAt || 0;
+  // 0 means "never expires"; otherwise only accept a token that lasts at least as long.
+  const extended = afterExp === 0 || (beforeExp !== 0 && afterExp >= beforeExp);
+  if (!extended) {
+    const msg = `the new token expires sooner (${days(afterExp)} days) than the current one (${days(beforeExp)} days); .env left unchanged`;
+    if (days(beforeExp) <= warnDays) fail(`${msg}. The token expires soon: get a new one.`, 2);
+    console.error(`${stamp} token refresh skipped: ${msg}`);
+    return;
+  }
+
+  writePrivateFile(envFile, upsertEnv(content, { META_ADS_CLI_ACCESS_TOKEN: exchanged!.accessToken }));
+  const expText = afterExp ? `expires ${new Date(afterExp * 1000).toISOString().slice(0, 10)} (${days(afterExp)} days)` : 'does not expire';
+  console.log(`${stamp} token refreshed: ${expText}; was ${days(beforeExp)} days`);
+  if (afterExp && days(afterExp) <= warnDays) fail(`the token still expires in ${days(afterExp)} days; Meta did not extend it. Get a new one.`, 2);
 }

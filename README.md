@@ -109,6 +109,8 @@ meta-ads auth login-link
 meta-ads auth refresh-token
 ```
 
+To keep a long-lived token in `.env` fresh, run `meta-ads auth refresh-token --update-env /path/to/.env` weekly. For example, a systemd timer with `OnCalendar=weekly` and `Persistent=true`, and `WorkingDirectory` set to the folder holding `.env`. It only replaces the token after checking the new one works and lasts at least as long.
+
 Token storage: OS keychain via `keytar` (an optional dependency), fallback to `~/.config/meta-ads-cli/token-cache.json` (mode 0600).
 
 ## Global Options

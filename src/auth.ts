@@ -375,6 +375,19 @@ export class AuthManager {
     }
   }
 
+  /**
+   * Ask Meta about a token (debug_token, using the app token). Returns
+   * validity and expiry (unix seconds; 0 means it doesn't expire).
+   */
+  async inspectToken(token: string): Promise<{ isValid: boolean; expiresAt?: number; userId?: string }> {
+    if (!this.appId || !this.appSecret) throw new Error('App ID and App Secret are required to inspect a token.');
+    const qs = new URLSearchParams({ input_token: token, access_token: `${this.appId}|${this.appSecret}` });
+    const response = await fetch(`https://graph.facebook.com/${this.apiVersion}/debug_token?${qs}`, { signal: AbortSignal.timeout(30_000) });
+    const json = await response.json() as { data?: { is_valid?: boolean; expires_at?: number; user_id?: string }; error?: { message?: string } };
+    if (!response.ok || !json.data) throw new Error(`debug_token failed: ${json.error?.message || response.status}`);
+    return { isValid: Boolean(json.data.is_valid), expiresAt: json.data.expires_at, userId: json.data.user_id };
+  }
+
   getAppSecret(): string {
     return this.appSecret;
   }
