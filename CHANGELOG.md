@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Copying campaigns between ad accounts with their creative content:**
+  - **`backup export`:** `--with-media <dir>` downloads every image and video the creatives use. New filters: `--campaign-ids`, `--adset-status`, `--ad-status` and `--skip-rejected`. Creatives the account listing misses are fetched one by one.
+  - **`backup restore --account-id <other>`:**
+    - Copies images server-side (`copy_from`), falling back to uploading the exported files, and uploads videos and waits until they're ready.
+    - Rewrites image hashes and video IDs in the creatives.
+    - Keeps only portable tracking specs, and skips ads whose creative didn't restore.
+  - **`backup restore` options:** `--campaign-map`, `--adset-map` and `--creative-map` reuse objects that already exist, for finishing a partial restore. `--exclude-countries` adds excluded countries to every ad set, e.g. for Meta's Taiwan/Singapore ad declarations. `--name-suffix` renames restored objects.
+  - **Fixes:** restore no longer sends the read-only `call_to_action_type` (Meta rejected it with error #3) or zero budgets. `--account-id` now defaults to the snapshot's account, as documented, instead of `META_ADS_CLI_ACCOUNT_ID`.
+
 - `auth refresh-token --update-env <file>` exchanges the token in an `.env` file for a new long-lived one. It verifies the new token (valid, same user, expires no sooner) before rewriting that one line, never prints tokens, and exits 2 when the token is about to expire and Meta didn't extend it (`--warn-days`, default 14). Meant for a weekly systemd timer or cron job; see README.
 
 ## 0.4.1 — 2026-10-27

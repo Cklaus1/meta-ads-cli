@@ -286,6 +286,21 @@ meta-ads insights get 12345 -o csv > report.csv
 
 Any option that takes JSON also accepts `@path/to/file.json` or `-` for stdin.
 
+### Copying campaigns between ad accounts
+
+```bash
+# Export one campaign (active ad sets/ads, no rejected ads) with its images and videos
+meta-ads backup export --account-id act_SOURCE --campaign-ids 1202... \
+  --adset-status ACTIVE --ad-status ACTIVE --skip-rejected \
+  --with-media ./export/media --file ./export/snapshot.json
+
+# Preview, then copy into another account (everything PAUSED)
+meta-ads --dry-run backup restore --file ./export/snapshot.json --account-id act_TARGET
+meta-ads backup restore --file ./export/snapshot.json --account-id act_TARGET --yes
+```
+
+Images are copied server-side, falling back to the exported files; videos are uploaded from the exported files. If a restore stops partway, rerun it with `--campaign-map`/`--adset-map`/`--creative-map old=new` to reuse what was already created.
+
 ### Webhooks
 
 | Command | Subcommands | Description |
