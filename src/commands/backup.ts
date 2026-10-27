@@ -23,7 +23,7 @@ const ADSET_FIELDS = 'id,name,campaign_id,status,daily_budget,lifetime_budget,'
   + 'daily_min_spend_target,daily_spend_cap,lifetime_min_spend_target,lifetime_spend_cap,'
   + 'targeting,bid_amount,bid_strategy,optimization_goal,billing_event,start_time,end_time,'
   + 'adset_schedule,is_dynamic_creative,frequency_control_specs,promoted_object,destination_type,'
-  + 'attribution_spec,pacing_type,dsa_beneficiary,dsa_payor';
+  + 'attribution_spec,pacing_type,dsa_beneficiary,dsa_payor,regional_regulated_categories,regional_regulated_identities';
 
 const AD_FIELDS = 'id,name,adset_id,campaign_id,status,effective_status,ad_review_feedback,creative,'
   + 'bid_amount,tracking_specs,conversion_domain';
@@ -45,7 +45,7 @@ const ADSET_CREATE = new Set([
   'bid_amount', 'bid_strategy', 'optimization_goal', 'billing_event', 'start_time',
   'end_time', 'adset_schedule', 'is_dynamic_creative', 'frequency_control_specs',
   'promoted_object', 'destination_type', 'attribution_spec', 'pacing_type',
-  'dsa_beneficiary', 'dsa_payor',
+  'dsa_beneficiary', 'dsa_payor', 'regional_regulated_categories', 'regional_regulated_identities',
 ]);
 const AD_CREATE = new Set(['name', 'status', 'bid_amount', 'tracking_specs', 'conversion_domain']);
 // call_to_action_type is read-only metadata (the CTA lives in the story

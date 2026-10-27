@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **New `business` commands:**
+  - `business share-pixel <pixelId> --account-id --business-id` shares a business-owned pixel or dataset with an ad account, so its ad sets can optimize for the pixel's events.
+  - `business pixel-accounts` lists the accounts a pixel is shared with.
+- **`backup`:** export and restore carry ad sets' regional ad declarations (`regional_regulated_categories`, `regional_regulated_identities`), which Meta requires for Taiwan, Singapore and similar locations.
 - **Copying campaigns between ad accounts with their creative content:**
   - **`backup export`:** `--with-media <dir>` downloads every image and video the creatives use. New filters: `--campaign-ids`, `--adset-status`, `--ad-status` and `--skip-rejected`. Creatives the account listing misses are fetched one by one.
   - **`backup restore --account-id <other>`:**

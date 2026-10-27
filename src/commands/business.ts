@@ -69,6 +69,34 @@ export function registerBusinessCommands(program: Command, getClient: () => Meta
     }));
 
   biz
+    .command('pixel-accounts <pixelId>')
+    .description('List the ad accounts a pixel is shared with')
+    .requiredOption('--business-id <id>', 'Business that owns the pixel')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pixelId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(`${pixelId}/shared_accounts`, {
+        params: { business: opts.businessId, fields: 'id,name,account_status' },
+      });
+      console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  biz
+    .command('share-pixel <pixelId>')
+    .description('Share a business-owned pixel with an ad account, so its ad sets can optimize for the pixel\'s events')
+    .requiredOption('--account-id <id>', 'Ad account to share with (act_XXX)')
+    .requiredOption('--business-id <id>', 'Business that owns the pixel')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pixelId: string, opts) => {
+      const client = getClient();
+      const response = await client.request(`${pixelId}/shared_accounts`, {
+        method: 'POST',
+        body: { account_id: String(opts.accountId).replace(/^act_/, ''), business: opts.businessId },
+      });
+      console.log(formatOutput({ pixel_id: pixelId, account_id: opts.accountId, response: response.data }, opts.output as OutputFormat));
+    }));
+
+  biz
     .command('users <businessId>')
     .description('List users in a Business Manager')
     .option('-o, --output <format>', 'Output format', 'json')
