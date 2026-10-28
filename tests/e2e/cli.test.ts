@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
@@ -34,10 +34,8 @@ function runCliExpectFail(args: string[], env?: Record<string, string>): Promise
 }
 
 describe('CLI E2E', () => {
-  beforeAll(async () => {
-    // Ensure built
-    await exec('npm', ['run', 'build'], { timeout: 30000 });
-  });
+  // dist/ is built once by tests/global-setup.ts, so suites that run the
+  // CLI in parallel never see a half-written build.
 
   describe('help and version', () => {
     it('shows help with --help', async () => {

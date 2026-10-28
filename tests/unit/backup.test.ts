@@ -45,3 +45,27 @@ describe('backup restore', () => {
     expect(out.created_objects).toBe(5);
   });
 });
+
+describe('backup restore resume', () => {
+  it('skips ads that already exist by name in a reused ad set', async () => {
+    const file = path.join(tmp, `snap-num-${Math.random()}.json`);
+    fs.writeFileSync(file, JSON.stringify({
+      snapshot_version: 1, exported_at: '', api_version: 'v26.0', account_id: 'act_1',
+      campaigns: [{ id: '10', name: 'C1' }],
+      adsets: [{ id: '11', name: 'S1', campaign_id: '10' }, { id: '12', name: 'S2', campaign_id: '10' }],
+      ads: [{ id: '21', name: 'A1', adset_id: '11' }, { id: '22', name: 'A2', adset_id: '12' }],
+      creatives: [],
+    }));
+    const { client: c2, request } = mockClient(async (endpoint, opts) => {
+      if (endpoint === '31/ads') return { data: { data: [{ id: 'x', name: 'A1' }] }, status: 200 };
+      if (endpoint === '32/ads') return { data: { data: [] }, status: 200 };
+      return { data: { id: 'new' }, status: 200 };
+    });
+    const res = await run(registerBackupCommands, c2, ['backup', 'restore', '--file', file, '--yes',
+      '--campaign-map', '10=30', '--adset-map', '11=31,12=32']);
+    const out = JSON.parse(res.stdout);
+    const adPosts = request.mock.calls.filter(([e, o]) => e === 'act_1/ads' && o?.method === 'POST').map(([, o]) => o?.body?.name);
+    expect(adPosts).toEqual(['A2']);
+    expect(out.warnings.some((w: string) => w.includes('A1') && w.includes('already exists'))).toBe(true);
+  });
+});

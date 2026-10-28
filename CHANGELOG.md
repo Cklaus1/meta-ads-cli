@@ -2,10 +2,21 @@
 
 ## Unreleased
 
+- **`backup restore` is safer across accounts and against Meta's current rules:**
+  - Resuming skips ads that already exist by name in reused ad sets, so it doesn't create duplicates.
+  - Legacy objectives map to the current ones (e.g. `CONVERSIONS` → `OUTCOME_SALES`).
+  - `advantage_audience=0` is set when missing.
+  - Retired `standard_enhancements`, read-only `asset_feed_spec` fields, source-account ad label IDs and retired `location_types` are stripped.
+  - New options: `--ad-ids` (export), `--set-countries` and `--regional-categories` (restore).
+  - Regional identities are read and written under the correct field name, `regional_regulation_identities`.
+- **`adsets update`:**
+  - `--clear-location-types` fixes Meta error #1870194 without replacing the rest of the targeting.
+  - `--regional-categories`, `--regional-identities` and `--copy-regional-from` set the Taiwan/Singapore-style ad declarations.
+- **Tests:** `dist/` is now built once in a vitest global setup, so suites that run the CLI in parallel no longer race a rebuild.
 - **New `business` commands:**
   - `business share-pixel <pixelId> --account-id --business-id` shares a business-owned pixel or dataset with an ad account, so its ad sets can optimize for the pixel's events.
   - `business pixel-accounts` lists the accounts a pixel is shared with.
-- **`backup`:** export and restore carry ad sets' regional ad declarations (`regional_regulated_categories`, `regional_regulated_identities`), which Meta requires for Taiwan, Singapore and similar locations.
+- **`backup`:** export and restore carry ad sets' regional ad declarations (`regional_regulated_categories`, `regional_regulation_identities`), which Meta requires for Taiwan, Singapore and similar locations.
 - **Copying campaigns between ad accounts with their creative content:**
   - **`backup export`:** `--with-media <dir>` downloads every image and video the creatives use. New filters: `--campaign-ids`, `--adset-status`, `--ad-status` and `--skip-rejected`. Creatives the account listing misses are fetched one by one.
   - **`backup restore --account-id <other>`:**

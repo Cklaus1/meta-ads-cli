@@ -58,3 +58,36 @@ describe('restore options', () => {
       .toEqual({ geo_locations: { country_groups: ['worldwide'] }, excluded_geo_locations: { countries: ['CN', 'TW'] } });
   });
 });
+
+import { withoutRetiredEnhancements } from '../../src/commands/backup.js';
+describe('withoutRetiredEnhancements', () => {
+  it('drops standard_enhancements and keeps individual features', () => {
+    const c = { id: '1', degrees_of_freedom_spec: { creative_features_spec: { standard_enhancements: { enroll_status: 'OPT_IN' }, image_touchups: { enroll_status: 'OPT_IN' } } } };
+    expect(withoutRetiredEnhancements(c).degrees_of_freedom_spec).toEqual({ creative_features_spec: { image_touchups: { enroll_status: 'OPT_IN' } } });
+    const only = { id: '2', degrees_of_freedom_spec: { creative_features_spec: { standard_enhancements: { enroll_status: 'OPT_IN' } } } };
+    expect('degrees_of_freedom_spec' in withoutRetiredEnhancements(only)).toBe(false);
+  });
+});
+
+import { withPortableAdLabels, withoutReadOnlyFeedFields, LEGACY_OBJECTIVES } from '../../src/commands/backup.js';
+describe('cross-account creative cleanup', () => {
+  it('keeps ad label names but drops source-account ids', () => {
+    const c = { asset_feed_spec: { images: [{ hash: 'h', adlabels: [{ name: 'p1', id: '123' }] }] } };
+    expect(withPortableAdLabels(c).asset_feed_spec.images[0].adlabels).toEqual([{ name: 'p1' }]);
+  });
+  it('drops read-only asset feed fields', () => {
+    const c = { asset_feed_spec: { bodies: [], reasons_to_shop: false, shops_bundle: false, additional_data: {} } };
+    expect(withoutReadOnlyFeedFields(c).asset_feed_spec).toEqual({ bodies: [] });
+  });
+  it('maps legacy objectives', () => {
+    expect(LEGACY_OBJECTIVES.CONVERSIONS).toBe('OUTCOME_SALES');
+  });
+});
+
+import { stripLocationTypes } from '../../src/commands/adsets.js';
+describe('stripLocationTypes', () => {
+  it('removes retired location_types from included and excluded geo', () => {
+    expect(stripLocationTypes({ geo_locations: { countries: ['US'], location_types: ['home'] }, excluded_geo_locations: { countries: ['CA'], location_types: ['recent'] }, age_min: 18 }))
+      .toEqual({ geo_locations: { countries: ['US'] }, excluded_geo_locations: { countries: ['CA'] }, age_min: 18 });
+  });
+});
