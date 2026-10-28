@@ -5,6 +5,7 @@ import { MetaClient, API_VERSION, isPlaceholderId, PLACEHOLDER_PREFIX } from '..
 import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors, PolicyError } from '../errors.js';
 import { applyAdsetBudgetSharing, BLOCKED_SMART_PROMOTION_TYPES } from './campaigns.js';
+import { stripLocationTypes } from './adsets.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -23,7 +24,7 @@ const ADSET_FIELDS = 'id,name,campaign_id,status,daily_budget,lifetime_budget,'
   + 'daily_min_spend_target,daily_spend_cap,lifetime_min_spend_target,lifetime_spend_cap,'
   + 'targeting,bid_amount,bid_strategy,optimization_goal,billing_event,start_time,end_time,'
   + 'adset_schedule,is_dynamic_creative,frequency_control_specs,promoted_object,destination_type,'
-  + 'attribution_spec,pacing_type,dsa_beneficiary,dsa_payor,regional_regulated_categories,regional_regulated_identities';
+  + 'attribution_spec,pacing_type,dsa_beneficiary,dsa_payor,regional_regulated_categories,regional_regulation_identities';
 
 const AD_FIELDS = 'id,name,adset_id,campaign_id,status,effective_status,ad_review_feedback,creative,'
   + 'bid_amount,tracking_specs,conversion_domain';
@@ -45,7 +46,7 @@ const ADSET_CREATE = new Set([
   'bid_amount', 'bid_strategy', 'optimization_goal', 'billing_event', 'start_time',
   'end_time', 'adset_schedule', 'is_dynamic_creative', 'frequency_control_specs',
   'promoted_object', 'destination_type', 'attribution_spec', 'pacing_type',
-  'dsa_beneficiary', 'dsa_payor', 'regional_regulated_categories', 'regional_regulated_identities',
+  'dsa_beneficiary', 'dsa_payor', 'regional_regulated_categories', 'regional_regulation_identities',
 ]);
 const AD_CREATE = new Set(['name', 'status', 'bid_amount', 'tracking_specs', 'conversion_domain']);
 // call_to_action_type is read-only metadata (the CTA lives in the story
@@ -177,6 +178,7 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
     .option('--adset-status <status>', 'Only keep ad sets with this configured status (ACTIVE, PAUSED)')
     .option('--ad-status <status>', 'Only keep ads with this configured status (ACTIVE, PAUSED)')
     .option('--skip-rejected', 'Leave out ads that are disapproved or flagged in review')
+    .option('--ad-ids <ids>', 'Only keep these ads (comma-separated), with their ad sets and creatives')
     .option('--with-media <dir>', 'Also download every image and video the creatives use into this folder, so the snapshot can be restored into another account')
     .option('-o, --output <format>', 'Output format when writing to stdout', 'json')
     .action(handleErrors(async (opts) => {
@@ -216,8 +218,14 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
         adsets = adsets.filter(a => String(a.status) === String(opts.adsetStatus).toUpperCase());
         excluded.adsets_by_status = before - adsets.length;
       }
-      const keptAdsets = new Set(adsets.map(a => a.id));
       const beforeAds = ads.length;
+      if (opts.adIds) {
+        const wanted = new Set(String(opts.adIds).split(',').map((x: string) => x.trim()).filter(Boolean));
+        ads = ads.filter(a => wanted.has(String(a.id)));
+        const wantedAdsets = new Set(ads.map(a => String(a.adset_id)));
+        adsets = adsets.filter(a => wantedAdsets.has(String(a.id)));
+      }
+      const keptAdsets = new Set(adsets.map(a => a.id));
       ads = ads.filter(a => keptAdsets.has(String(a.adset_id)));
       if (opts.adStatus) ads = ads.filter(a => String(a.status) === String(opts.adStatus).toUpperCase());
       if (opts.skipRejected) {
@@ -348,6 +356,8 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
     .option('--campaign-map <pairs>', 'Reuse existing campaigns instead of creating them: oldId=newId[,oldId=newId] (e.g. to finish a partial restore)')
     .option('--adset-map <pairs>', 'Reuse existing ad sets: oldId=newId[,...]')
     .option('--creative-map <pairs>', 'Reuse existing creatives: oldId=newId[,...]')
+    .option('--set-countries <codes>', 'Replace every restored ad set\'s geo targeting with these countries (comma-separated, or @file with one code per line)')
+    .option('--regional-categories <list>', 'Set regional_regulated_categories on every restored ad set (e.g. TAIWAN_UNIVERSAL,SINGAPORE_UNIVERSAL)')
     .option('--exclude-countries <codes>', 'Add these countries (comma-separated, e.g. TW) to every restored ad set\'s excluded locations')
     .option('--yes', 'Confirm the restore (required for live writes)')
     .option('-o, --output <format>', 'Output format', 'json')
@@ -365,6 +375,10 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
       const reusedCampaigns = parseIdMap(opts.campaignMap);
       const reusedAdsets = parseIdMap(opts.adsetMap);
       const reusedCreatives = parseIdMap(opts.creativeMap);
+      const setCountries = opts.setCountries ? readCodeList(String(opts.setCountries)) : [];
+      const regionalCategories = opts.regionalCategories
+        ? String(opts.regionalCategories).split(',').map((c: string) => c.trim().toUpperCase()).filter(Boolean)
+        : [];
       const excludeCountries = opts.excludeCountries
         ? String(opts.excludeCountries).split(',').map((c: string) => c.trim().toUpperCase()).filter(Boolean)
         : [];
@@ -470,8 +484,8 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
             creativeMap[original.id] = reusedCreatives[original.id];
             continue;
           }
-          const c = crossAccount ? remapCreativeMedia(original, imageMap, videoMap) : original;
-          const body = pick(c, CREATIVE_CREATE);
+          const c = crossAccount ? withPortableAdLabels(remapCreativeMedia(original, imageMap, videoMap)) : original;
+          const body = pick(withoutReadOnlyFeedFields(withoutRetiredEnhancements(c)), CREATIVE_CREATE);
           if (!body.name) body.name = `Restored creative ${c.id}`;
           const failedBefore = failures.length;
           const newId = await create(`${accountId}/adcreatives`, body, 'creative', c.id);
@@ -499,6 +513,11 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
           const body = pick(camp, CAMPAIGN_CREATE);
           body.status = status;
           named(body);
+          const modern = LEGACY_OBJECTIVES[body.objective];
+          if (modern) {
+            warnings.push(`Campaign ${camp.id}: legacy objective ${body.objective} is no longer accepted; created as ${modern}.`);
+            body.objective = modern;
+          }
           if (!body.special_ad_categories) body.special_ad_categories = JSON.stringify(['NONE']);
           applyAdsetBudgetSharing(body);
           const failedBefore = failures.length;
@@ -524,6 +543,27 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
           }
           if (notValidated(`Ad set ${adset.id}`, newCamp)) continue;
           body.campaign_id = newCamp;
+          if (setCountries.length && body.targeting) {
+            const t = JSON.parse(body.targeting) as Record<string, unknown>;
+            const geo = (t.geo_locations as Record<string, unknown>) || {};
+            void geo;
+            t.geo_locations = { countries: setCountries };
+            body.targeting = JSON.stringify(t);
+          }
+          if (regionalCategories.length) body.regional_regulated_categories = JSON.stringify(regionalCategories);
+          // Meta retired location_types; ad sets carrying it can't be published (#1870194).
+          if (body.targeting) body.targeting = JSON.stringify(stripLocationTypes(JSON.parse(body.targeting)));
+          // Meta now requires an explicit Advantage+ audience choice. Snapshots from
+          // before it existed used exactly their own audience, so keep that (0).
+          if (body.targeting) {
+            const t = JSON.parse(body.targeting) as Record<string, unknown>;
+            const auto = (t.targeting_automation as Record<string, unknown>) || {};
+            if (auto.advantage_audience === undefined) {
+              t.targeting_automation = { ...auto, advantage_audience: 0 };
+              body.targeting = JSON.stringify(t);
+              warnings.push(`Ad set ${adset.id}: set Advantage+ audience off (advantage_audience=0), matching the original audience.`);
+            }
+          }
           if (excludeCountries.length && body.targeting) body.targeting = JSON.stringify(excludeFromTargeting(JSON.parse(body.targeting), excludeCountries));
           const failedBefore = failures.length;
           const newId = await create(`${accountId}/adsets`, body, 'adset', adset.id);
@@ -531,7 +571,15 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
           else if (failures.length === failedBefore) warnings.push(`Ad set ${adset.id} (${String(adset.name)}) did not return an ID.`);
         }
 
-        // 4. Ads — remap adset_id + creative.
+        // 4. Ads — remap adset_id + creative. In ad sets reused via --adset-map,
+        // skip ads that already exist by name, so a resumed restore can't duplicate them.
+        const existingAdNames = new Map<string, Set<string>>();
+        for (const newAdset of new Set(Object.values(reusedAdsets))) {
+          if (dryRun && isPlaceholderId(newAdset)) continue;
+          const resp = await client.requestAllPages(`${newAdset}/ads`, { params: { fields: 'id,name', limit: '200' } });
+          const names = ((resp.data as { data?: Array<{ name?: string }> }).data || []).map(a => String(a.name));
+          existingAdNames.set(newAdset, new Set(names));
+        }
         for (const ad of snap.ads) {
           const body = pick(ad, AD_CREATE);
           body.status = status;
@@ -548,6 +596,10 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
             continue;
           }
           if (notValidated(`Ad ${ad.id}`, newAdset)) continue;
+          if (body.name && existingAdNames.get(newAdset)?.has(body.name)) {
+            warnings.push(`Ad ${ad.id} (${body.name}) skipped — an ad with that name already exists in ad set ${newAdset}.`);
+            continue;
+          }
           body.adset_id = newAdset;
           const oldCreative = ad.creative?.id || ad.creative?.creative_id;
           const newCreative = oldCreative ? creativeMap[oldCreative] : undefined;
@@ -735,4 +787,74 @@ export function excludeFromTargeting(targeting: Record<string, unknown>, countri
   const current = Array.isArray(excluded.countries) ? (excluded.countries as string[]) : [];
   excluded.countries = [...new Set([...current, ...countries])];
   return { ...targeting, excluded_geo_locations: excluded };
+}
+
+/** Country codes from "US,CA" or "@file" (one or more per line, commas or whitespace). */
+export function readCodeList(value: string): string[] {
+  const text = value.startsWith('@') ? readFileSync(value.slice(1), 'utf8') : value;
+  const codes = text.split(/[\s,]+/).map(c => c.trim().toUpperCase()).filter(Boolean);
+  const bad = codes.filter(c => !/^[A-Z]{2}$/.test(c));
+  if (bad.length) throw new Error(`Invalid country code(s): ${bad.join(', ')}`);
+  return [...new Set(codes)];
+}
+
+/**
+ * Meta retired the standard_enhancements bundle (v22); creatives that still
+ * carry it are refused. Drop it and keep the individual feature settings.
+ */
+export function withoutRetiredEnhancements<T extends Record<string, unknown>>(creative: T): T {
+  const dof = creative.degrees_of_freedom_spec as { creative_features_spec?: Record<string, unknown> } | undefined;
+  const features = dof?.creative_features_spec;
+  if (!features || !('standard_enhancements' in features)) return creative;
+  const { standard_enhancements: _retired, ...rest } = features;
+  void _retired;
+  const next: Record<string, unknown> = { ...creative };
+  if (Object.keys(rest).length) next.degrees_of_freedom_spec = { ...dof, creative_features_spec: rest };
+  else delete next.degrees_of_freedom_spec;
+  return next as T;
+}
+
+/** Pre-ODAX objectives and the current objective Meta maps them to. */
+export const LEGACY_OBJECTIVES: Record<string, string> = {
+  CONVERSIONS: 'OUTCOME_SALES',
+  PRODUCT_CATALOG_SALES: 'OUTCOME_SALES',
+  STORE_VISITS: 'OUTCOME_AWARENESS',
+  LINK_CLICKS: 'OUTCOME_TRAFFIC',
+  LEAD_GENERATION: 'OUTCOME_LEADS',
+  POST_ENGAGEMENT: 'OUTCOME_ENGAGEMENT',
+  PAGE_LIKES: 'OUTCOME_ENGAGEMENT',
+  EVENT_RESPONSES: 'OUTCOME_ENGAGEMENT',
+  MESSAGES: 'OUTCOME_ENGAGEMENT',
+  VIDEO_VIEWS: 'OUTCOME_ENGAGEMENT',
+  REACH: 'OUTCOME_AWARENESS',
+  BRAND_AWARENESS: 'OUTCOME_AWARENESS',
+  APP_INSTALLS: 'OUTCOME_APP_PROMOTION',
+};
+
+// asset_feed_spec keys Meta returns on read but refuses on create.
+const READ_ONLY_FEED_KEYS = ['reasons_to_shop', 'shops_bundle', 'additional_data'];
+
+/** Drop read-only asset_feed_spec metadata so a flexible-format creative can be recreated. */
+export function withoutReadOnlyFeedFields<T extends Record<string, unknown>>(creative: T): T {
+  const feed = creative.asset_feed_spec as Record<string, unknown> | undefined;
+  if (!feed || !READ_ONLY_FEED_KEYS.some(k => k in feed)) return creative;
+  const cleaned = Object.fromEntries(Object.entries(feed).filter(([k]) => !READ_ONLY_FEED_KEYS.includes(k)));
+  return { ...creative, asset_feed_spec: cleaned };
+}
+
+/**
+ * Ad label IDs belong to the source account; another account can only match
+ * labels by name (Meta creates missing ones), so keep names and drop IDs.
+ */
+export function withPortableAdLabels<T>(creative: T): T {
+  const walk = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(walk);
+    if (!v || typeof v !== 'object') return v;
+    return Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([k, x]) => (
+      k === 'adlabels' && Array.isArray(x)
+        ? [k, x.map(l => (l && typeof l === 'object' && 'name' in l ? { name: (l as { name: unknown }).name } : l))]
+        : [k, walk(x)]
+    )));
+  };
+  return walk(creative) as T;
 }

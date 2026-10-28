@@ -5,6 +5,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    // Build dist/ once before any suite runs the CLI.
+    globalSetup: ['./tests/global-setup.ts'],
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts'],

@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, UsageError } from '../errors.js';
 import { parseJsonInput } from '../json-input.js';
 import { deriveMetrics, resultEventFor, PERFORMANCE_FIELDS, type DerivedMetrics } from '../metrics.js';
 import { insightsTimeParams } from '../time-range.js';
@@ -554,6 +554,10 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
     .option('--excluded-publisher-categories <cats>', 'Comma-separated publisher categories to exclude')
     .option('--brand-safety-filter <levels>', 'Comma-separated inventory filter levels (brand_safety_content_filter_levels)')
     .option('--placement-soft-opt-out <json>', 'placement_soft_opt_out JSON')
+    .option('--regional-categories <list>', 'Regional ad declarations, e.g. TAIWAN_UNIVERSAL,SINGAPORE_UNIVERSAL ("none" to clear)')
+    .option('--regional-identities <json>', 'Verified identity IDs per category (regional_regulation_identities JSON, inline or @file), e.g. {"taiwan_universal_beneficiary":"ID","taiwan_universal_payer":"ID"}')
+    .option('--clear-location-types', 'Remove the retired location_types setting (living in / recently in / traveling in) from the ad set\'s geo targeting (Meta error #1870194)')
+    .option('--copy-regional-from <adsetId>', 'Copy regional_regulated_categories and regional_regulation_identities from another ad set')
     .option('--creative-audience-pairing <0|1>', 'Advantage+ creative audience pairing')
     .option('--frequency-cap <n/days>', 'Frequency cap, e.g. 2/7 (REACH/THRUPLAY ad sets only)')
     .option('--frequency-control-specs <json>', 'Frequency capping as JSON array (REACH/THRUPLAY ad sets only)')
@@ -606,6 +610,23 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       if (opts.frequencyCap) body.frequency_control_specs = frequencyCapSpecs(opts.frequencyCap);
       if (opts.brandSafetyFilter) body.brand_safety_content_filter_levels = JSON.stringify(csvList(opts.brandSafetyFilter));
       if (opts.placementSoftOptOut) body.placement_soft_opt_out = jsonOption(opts.placementSoftOptOut, '--placement-soft-opt-out');
+      if (opts.copyRegionalFrom) {
+        const src = (await client.request(String(opts.copyRegionalFrom), {
+          params: { fields: 'regional_regulated_categories,regional_regulation_identities' },
+        })).data as { regional_regulated_categories?: string[]; regional_regulation_identities?: Record<string, unknown> };
+        if (!src.regional_regulation_identities) {
+          throw new UsageError(`Ad set ${opts.copyRegionalFrom} has no verified regional identities to copy. Set the beneficiary and payer on it in Ads Manager first.`);
+        }
+        body.regional_regulated_categories = JSON.stringify(src.regional_regulated_categories || []);
+        body.regional_regulation_identities = JSON.stringify(src.regional_regulation_identities);
+      }
+      if (opts.regionalCategories) {
+        const list = String(opts.regionalCategories).toLowerCase() === 'none'
+          ? []
+          : String(opts.regionalCategories).split(',').map((c: string) => c.trim().toUpperCase()).filter(Boolean);
+        body.regional_regulated_categories = JSON.stringify(list);
+      }
+      if (opts.regionalIdentities) body.regional_regulation_identities = jsonOption(opts.regionalIdentities, '--regional-identities');
 
       // Build targeting with placement controls
       const placements: Record<string, string[]> = {};
@@ -620,7 +641,8 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       const advantageAudience = parseAdvantageAudience(opts.advantageAudience);
       const hasPlacement = Object.keys(placements).length > 0;
       const hasHelpers = applyTargetingHelpers({}, opts);
-      const changesTargeting = hasPlacement || hasHelpers || Boolean(opts.targetingAutomation) || advantageAudience !== undefined;
+      const changesTargeting = hasPlacement || hasHelpers || Boolean(opts.targetingAutomation) || advantageAudience !== undefined
+        || Boolean(opts.clearLocationTypes);
 
       let targeting: Record<string, unknown> = {};
       let campaignId: string | undefined;
@@ -641,6 +663,7 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       Object.assign(targeting, placements);
       applyTargetingHelpers(targeting, opts);
       applyTargetingAutomation(targeting, opts.targetingAutomation, advantageAudience);
+      if (opts.clearLocationTypes) stripLocationTypes(targeting);
       assertNoRemovedPlacements(targeting);
       if (opts.targeting || changesTargeting) {
         // Same checks as create: HEC-F ad sets need an explicit Advantage+
@@ -708,4 +731,17 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
     }));
+}
+
+/**
+ * Meta retired location_types (people living in / recently in / traveling
+ * in); ad sets that still carry it can't be published (#1870194). Remove it
+ * from included and excluded locations.
+ */
+export function stripLocationTypes(targeting: Record<string, unknown>): Record<string, unknown> {
+  for (const key of ['geo_locations', 'excluded_geo_locations']) {
+    const geo = targeting[key] as Record<string, unknown> | undefined;
+    if (geo && 'location_types' in geo) delete geo.location_types;
+  }
+  return targeting;
 }
