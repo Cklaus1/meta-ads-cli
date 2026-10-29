@@ -435,6 +435,9 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
     .option('--excluded-publisher-categories <cats>', 'Comma-separated publisher categories to exclude (e.g. debated_social_issues,mature_audiences,tragedy_and_conflict)')
     .option('--brand-safety-filter <levels>', 'Comma-separated inventory filter levels (brand_safety_content_filter_levels, e.g. FACEBOOK_STANDARD,AN_STANDARD)')
     .option('--placement-soft-opt-out <json>', 'Let up to 5% of spend reach excluded placements (placement_soft_opt_out JSON, Sales/Leads objectives)')
+    .option('--regional-categories <list>', 'Regional ad declarations, e.g. TAIWAN_UNIVERSAL,SINGAPORE_UNIVERSAL')
+    .option('--regional-identities <json>', 'Verified identity IDs per category (regional_regulation_identities JSON, inline or @file)')
+    .option('--copy-regional-from <adsetId>', 'Copy regional_regulated_categories and regional_regulation_identities from another ad set')
     .option('--creative-audience-pairing <0|1>', 'Advantage+ creative audience pairing (targeting.targeting_automation.creative_audience_pairing)')
     .option('--frequency-cap <n/days>', 'Frequency cap, e.g. 2/7 = at most 2 impressions per person per 7 days (REACH/THRUPLAY ad sets only)')
     .option('--targeting-automation <json>', 'Targeting automation config as JSON, merged into targeting.targeting_automation (v25: age/gender as suggestions)')
@@ -499,6 +502,7 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       if (opts.adlabels) body.adlabels = jsonOption(opts.adlabels, '--adlabels');
       if (opts.brandSafetyFilter) body.brand_safety_content_filter_levels = JSON.stringify(csvList(opts.brandSafetyFilter));
       if (opts.placementSoftOptOut) body.placement_soft_opt_out = jsonOption(opts.placementSoftOptOut, '--placement-soft-opt-out');
+      await applyRegionalOptions(client, body, opts);
 
       // Build targeting with placement controls
       const targeting: Record<string, unknown> = opts.targeting ? parseJsonInput(opts.targeting, '--targeting') : {};
@@ -610,23 +614,7 @@ export function registerAdSetCommands(program: Command, getClient: () => MetaCli
       if (opts.frequencyCap) body.frequency_control_specs = frequencyCapSpecs(opts.frequencyCap);
       if (opts.brandSafetyFilter) body.brand_safety_content_filter_levels = JSON.stringify(csvList(opts.brandSafetyFilter));
       if (opts.placementSoftOptOut) body.placement_soft_opt_out = jsonOption(opts.placementSoftOptOut, '--placement-soft-opt-out');
-      if (opts.copyRegionalFrom) {
-        const src = (await client.request(String(opts.copyRegionalFrom), {
-          params: { fields: 'regional_regulated_categories,regional_regulation_identities' },
-        })).data as { regional_regulated_categories?: string[]; regional_regulation_identities?: Record<string, unknown> };
-        if (!src.regional_regulation_identities) {
-          throw new UsageError(`Ad set ${opts.copyRegionalFrom} has no verified regional identities to copy. Set the beneficiary and payer on it in Ads Manager first.`);
-        }
-        body.regional_regulated_categories = JSON.stringify(src.regional_regulated_categories || []);
-        body.regional_regulation_identities = JSON.stringify(src.regional_regulation_identities);
-      }
-      if (opts.regionalCategories) {
-        const list = String(opts.regionalCategories).toLowerCase() === 'none'
-          ? []
-          : String(opts.regionalCategories).split(',').map((c: string) => c.trim().toUpperCase()).filter(Boolean);
-        body.regional_regulated_categories = JSON.stringify(list);
-      }
-      if (opts.regionalIdentities) body.regional_regulation_identities = jsonOption(opts.regionalIdentities, '--regional-identities');
+      await applyRegionalOptions(client, body, opts);
 
       // Build targeting with placement controls
       const placements: Record<string, string[]> = {};
@@ -744,4 +732,28 @@ export function stripLocationTypes(targeting: Record<string, unknown>): Record<s
     if (geo && 'location_types' in geo) delete geo.location_types;
   }
   return targeting;
+}
+
+/** --copy-regional-from / --regional-categories / --regional-identities → body fields (create and update). */
+async function applyRegionalOptions(
+  client: MetaClient, body: Record<string, string>,
+  opts: { copyRegionalFrom?: string; regionalCategories?: string; regionalIdentities?: string },
+): Promise<void> {
+  if (opts.copyRegionalFrom) {
+    const src = (await client.request(String(opts.copyRegionalFrom), {
+      params: { fields: 'regional_regulated_categories,regional_regulation_identities' },
+    })).data as { regional_regulated_categories?: string[]; regional_regulation_identities?: Record<string, unknown> };
+    if (!src.regional_regulation_identities && !client.isDryRun()) {
+      throw new UsageError(`Ad set ${opts.copyRegionalFrom} has no verified regional identities to copy. Set the beneficiary and payer on it in Ads Manager first.`);
+    }
+    body.regional_regulated_categories = JSON.stringify(src.regional_regulated_categories || []);
+    body.regional_regulation_identities = JSON.stringify(src.regional_regulation_identities || {});
+  }
+  if (opts.regionalCategories) {
+    const list = String(opts.regionalCategories).toLowerCase() === 'none'
+      ? []
+      : String(opts.regionalCategories).split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+    body.regional_regulated_categories = JSON.stringify(list);
+  }
+  if (opts.regionalIdentities) body.regional_regulation_identities = jsonOption(opts.regionalIdentities, '--regional-identities');
 }

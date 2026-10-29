@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`targeting validate --ids`:** bare IDs are no longer misreported as invalid when they aren't interests or behaviors. Meta's untyped check only covers those two types, so the CLI now retries other types and lists every type an ID is valid as. Typed `type:id` entries (e.g. `education_majors:104076956295773`) are checked exactly.
+- **`adsets create`:** `--regional-categories`, `--regional-identities` and `--copy-regional-from`, like `update`, so Taiwan/Singapore-style declarations can be set at creation.
 - **`backup restore` is safer across accounts and against Meta's current rules:**
   - Resuming skips ads that already exist by name in reused ad sets, so it doesn't create duplicates.
   - Legacy objectives map to the current ones (e.g. `CONVERSIONS` → `OUTCOME_SALES`).
