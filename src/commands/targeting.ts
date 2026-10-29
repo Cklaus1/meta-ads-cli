@@ -26,6 +26,46 @@ export function targetingEntries(spec: Record<string, unknown>): Array<{ type: s
   return out;
 }
 
+/** Split --ids into typed (type:id) targeting_list entries and bare IDs. */
+export function parseIdList(value: unknown): { typed: Array<{ type: string; id: string }>; untyped: string[] } {
+  const typed: Array<{ type: string; id: string }> = [];
+  const untyped: string[] = [];
+  for (const raw of String(value ?? '').split(',').map(v => v.trim()).filter(Boolean)) {
+    const m = /^([a-z_]+):(\d+)$/.exec(raw);
+    if (m) {
+      if (!VALIDATABLE_KEYS.includes(m[1])) throw new Error(`Unknown targeting type "${m[1]}". Use one of: ${VALIDATABLE_KEYS.join(', ')}`);
+      typed.push({ type: m[1], id: m[2] });
+    } else {
+      untyped.push(raw);
+    }
+  }
+  return { typed, untyped };
+}
+
+/**
+ * Replace each unresolved bare ID's "invalid" node with what the typed retry
+ * found. One ID can be valid as several types (e.g. a field of study and an
+ * employer), so list every match rather than guessing.
+ */
+export function mergeRetried(
+  nodes: Array<Record<string, unknown>>, retry: Array<Record<string, unknown>>, unresolved: string[],
+): Array<Record<string, unknown>> {
+  return nodes.map(node => {
+    const id = String(node.id);
+    if (!unresolved.includes(id) || node.valid !== false) return node;
+    const matches = retry.filter(r => String(r.id) === id && r.valid === true);
+    if (matches.length === 0) return node;
+    if (matches.length === 1) return matches[0];
+    return {
+      id,
+      name: matches[0].name,
+      valid: true,
+      matched_types: matches.map(m => ({ type: m.type, path: m.path, audience_size_lower_bound: m.audience_size_lower_bound })),
+      note: 'This ID is valid as several targeting types; pass type:id (e.g. education_majors:ID) to check the one you use.',
+    };
+  });
+}
+
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
 }
@@ -150,7 +190,7 @@ export function registerTargetingCommands(program: Command, getClient: () => Met
     .description('Check a targeting spec before launch: invalid or retired interests/behaviors, and whether Meta can estimate delivery')
     .option('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
     .option('--targeting <json>', 'Targeting spec to check (inline, @file or -)')
-    .option('--ids <ids>', 'Comma-separated interest/behavior IDs to check')
+    .option('--ids <ids>', 'Comma-separated targeting IDs to check, optionally typed as type:id (e.g. education_majors:104076956295773); untyped IDs are matched against every targeting type')
     .option('--names <names>', 'Comma-separated interest names to check')
     .option('--optimization-goal <goal>', 'Optimization goal for the delivery estimate', 'REACH')
     .option('-o, --output <format>', 'Output format', 'json')
@@ -168,13 +208,25 @@ export function registerTargetingCommands(program: Command, getClient: () => Met
       const spec = opts.targeting ? parseJsonInput<Record<string, unknown>>(opts.targeting, '--targeting') : undefined;
       const params: Record<string, string> = {};
       const entries = spec ? targetingEntries(spec) : [];
-      if (entries.length) params.targeting_list = JSON.stringify(entries);
-      if (opts.ids) params.id_list = JSON.stringify(String(opts.ids).split(',').map((v: string) => v.trim()).filter(Boolean));
+      const { typed, untyped } = parseIdList(opts.ids);
+      if (entries.length || typed.length) params.targeting_list = JSON.stringify([...entries, ...typed]);
+      if (untyped.length) params.id_list = JSON.stringify(untyped);
       if (opts.names) params.name_list = JSON.stringify(String(opts.names).split(',').map((v: string) => v.trim()).filter(Boolean));
 
       if (Object.keys(params).length) {
-        const validation = await client.request(`${opts.accountId}/targetingvalidation`, { params });
-        const nodes = ((validation.data as { data?: Array<Record<string, unknown>> }).data || []);
+        const validate = async (p: Record<string, string>) => ((await client.request(`${opts.accountId}/targetingvalidation`, { params: p }))
+          .data as { data?: Array<Record<string, unknown>> }).data || [];
+        let nodes = await validate(params);
+        // An untyped id_list only covers interests and behaviors, so other kinds
+        // (education majors, employers, ...) come back invalid. Retry those IDs
+        // once as every type and keep whichever type Meta recognises.
+        const unresolved = untyped.filter(id => nodes.some(n => String(n.id) === id && n.valid === false));
+        if (unresolved.length) {
+          const retry = await validate({
+            targeting_list: JSON.stringify(unresolved.flatMap(id => VALIDATABLE_KEYS.map(type => ({ type, id })))),
+          });
+          nodes = mergeRetried(nodes, retry, unresolved);
+        }
         result.entries = nodes;
         for (const node of nodes) {
           if (node.valid === false) problems.push(`${node.type || 'targeting'} ${node.name || node.id} is not valid`);
