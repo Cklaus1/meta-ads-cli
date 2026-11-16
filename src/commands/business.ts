@@ -1,7 +1,12 @@
 import { Command } from 'commander';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import crypto from 'crypto';
+import fs from 'fs';
+import { handleErrors, UsageError } from '../errors.js';
+import { getProfile, setProfile } from '../profiles.js';
+import { upsertEnv } from './setup.js';
+import { writePrivateFile } from '../private-file.js';
 
 export function registerBusinessCommands(program: Command, getClient: () => MetaClient): void {
   const biz = program.command('business').alias('bm').description('Business Manager: accounts, pages, pixels, users, permissions');
@@ -118,6 +123,65 @@ export function registerBusinessCommands(program: Command, getClient: () => Meta
         params: { fields: 'id,name,role,created_time' },
       });
       console.log(formatOutput(response.data, opts.output as OutputFormat));
+    }));
+
+  biz
+    .command('system-user-token <systemUserId>')
+    .description('Generate an access token for a system user (non-expiring unless --expiring) and save it to a profile or .env file. The token is never printed.')
+    .option('--app-id <id>', 'App to issue the token for (default: META_ADS_CLI_APP_ID)')
+    .option('--scope <permissions>', 'Comma-separated permissions', 'ads_management,ads_read,business_management,read_insights')
+    .option('--expiring', 'Issue a 60-day token instead of a non-expiring one')
+    .option('--save-profile <name>', 'Save the token as this profile\'s access token (creates the profile if needed)')
+    .option('--update-env <file>', 'Write the token to META_ADS_CLI_ACCESS_TOKEN in this .env file')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (systemUserId: string, opts) => {
+      if (!opts.saveProfile && !opts.updateEnv) throw new UsageError('Pass --save-profile <name> or --update-env <file> so the token is stored, not printed');
+      const appId = opts.appId || process.env.META_ADS_CLI_APP_ID;
+      const appSecret = process.env.META_ADS_CLI_APP_SECRET;
+      if (!appId || !appSecret) throw new UsageError('META_ADS_CLI_APP_ID and META_ADS_CLI_APP_SECRET are required (appsecret_proof)');
+      const client = getClient();
+      const callerToken = process.env.META_ADS_CLI_ACCESS_TOKEN || process.env.META_ACCESS_TOKEN;
+      if (!callerToken) throw new UsageError('An admin user token is required in META_ADS_CLI_ACCESS_TOKEN');
+      const proof = crypto.createHmac('sha256', appSecret).update(callerToken).digest('hex');
+
+      // The app must be installed for the system user before it can get a token.
+      await client.request(`${systemUserId}/applications`, { method: 'POST', body: { business_app: appId } });
+      const resp = await client.request(`${systemUserId}/access_tokens`, {
+        method: 'POST',
+        body: {
+          business_app: appId,
+          scope: opts.scope,
+          appsecret_proof: proof,
+          ...(opts.expiring ? { set_token_expires_in_60_days: 'true' } : {}),
+        },
+      });
+      const token = (resp.data as { access_token?: string }).access_token;
+      if (!token) {
+        if (client.isPreviewMode()) {
+          console.log(formatOutput({ system_user_id: systemUserId, preview: true }, opts.output as OutputFormat));
+          return;
+        }
+        throw new Error('Meta did not return a token');
+      }
+
+      const saved: string[] = [];
+      if (opts.saveProfile) {
+        const existing = getProfile(opts.saveProfile) || { name: opts.saveProfile };
+        const { storedIn } = await setProfile({ ...existing, accessToken: token });
+        saved.push(`profile ${opts.saveProfile} (${storedIn})`);
+      }
+      if (opts.updateEnv) {
+        const content = fs.existsSync(opts.updateEnv) ? fs.readFileSync(opts.updateEnv, 'utf8') : '';
+        writePrivateFile(opts.updateEnv, upsertEnv(content, { META_ADS_CLI_ACCESS_TOKEN: token }));
+        saved.push(opts.updateEnv);
+      }
+      console.log(formatOutput({
+        system_user_id: systemUserId,
+        app_id: appId,
+        scope: opts.scope,
+        expires: opts.expiring ? 'in 60 days' : 'never',
+        saved_to: saved,
+      }, opts.output as OutputFormat));
     }));
 
   biz
