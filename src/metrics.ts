@@ -55,6 +55,20 @@ const OBJECTIVE_TO_EVENT: Record<string, string> = {
   OUTCOME_AWARENESS: 'reach',
 };
 
+/**
+ * The insights action type an ad set's promoted_object optimizes for:
+ * a custom conversion, a custom pixel event ("OTHER"), or a standard event.
+ * Undefined when the promoted object doesn't name a conversion event.
+ */
+export function resultEventForPromotedObject(po: Record<string, unknown> | undefined): string | undefined {
+  if (!po) return undefined;
+  if (po.custom_conversion_id) return `offsite_conversion.custom.${po.custom_conversion_id}`;
+  const type = typeof po.custom_event_type === 'string' ? po.custom_event_type : undefined;
+  if (!type) return undefined;
+  if (type === 'OTHER') return 'offsite_conversion.fb_pixel_custom';
+  return CUSTOM_EVENT_TO_EVENT[type];
+}
+
 /** The event that counts as a "result", most specific signal first. */
 export function resultEventFor(opts: { objective?: string; optimizationGoal?: string; customEventType?: string }): string {
   if (opts.customEventType && CUSTOM_EVENT_TO_EVENT[opts.customEventType]) return CUSTOM_EVENT_TO_EVENT[opts.customEventType];

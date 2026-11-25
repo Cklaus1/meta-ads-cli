@@ -6,6 +6,8 @@ _Researched 2026-10-27. Sources are official Meta developer pages unless marked 
 
 Items 1–11, 15, 18–21, 26, 30, 33 and 37–38 (via Meta's `error_user_msg` in CLI errors) are done. The default is now v26.0. Not done: optional new-capability items 22–25, 27–29, 31–32, 34–35. Items 12–14, 16, 17, 36, 39, 40 and 41 need no CLI change. See CHANGELOG.md.
 
+> **Correction (2026-11-24):** item 9 is wrong. Meta still requires `country` or `location_spec` on lookalikes; creating one without it fails with #2654. The CLI sends a location again.
+
 ## TL;DR
 
 - **The latest version is v26.0 (released 2026-07-29). No v27.0 has been announced.** The CLI defaults to v25.0 (`src/meta-client.ts:8`, `src/commands/doctor.ts:30`).

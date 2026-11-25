@@ -4,7 +4,7 @@ import { formatOutput, type OutputFormat } from '../formatter.js';
 import { handleErrors, UsageError } from '../errors.js';
 import { insightsTimeParams } from '../time-range.js';
 import { parseJsonInput } from '../json-input.js';
-import { deriveMetrics, resultEventFor, actionValue } from '../metrics.js';
+import { deriveMetrics, resultEventFor, resultEventForPromotedObject, actionValue } from '../metrics.js';
 
 function getDefaultAccountId(): string {
   return process.env.META_ADS_CLI_ACCOUNT_ID || '';
@@ -89,9 +89,13 @@ export function parseFiltering(value: string): string {
 }
 
 /** Add result/cost-per-result/revenue/ROAS columns, using each row's objective and optimization goal. */
-export function addDerivedColumns(rows: Array<Record<string, unknown>>, resultEvent?: string): Array<Record<string, unknown>> {
+export function addDerivedColumns(
+  rows: Array<Record<string, unknown>>, resultEvent?: string, optimizedEvents?: OptimizedEvents,
+): Array<Record<string, unknown>> {
   return rows.map(row => {
-    const event = resultEvent || resultEventFor({
+    const fromAdset = optimizedEvents?.adsets.get(String(row.adset_id ?? ''));
+    const fromCampaign = optimizedEvents?.campaigns.get(String(row.campaign_id ?? ''));
+    const event = resultEvent || fromAdset || (fromCampaign && fromCampaign !== MIXED ? fromCampaign : undefined) || resultEventFor({
       objective: row.objective as string | undefined,
       optimizationGoal: row.optimization_goal as string | undefined,
     });
@@ -105,8 +109,56 @@ export function addDerivedColumns(rows: Array<Record<string, unknown>>, resultEv
       revenue: round(m.revenue),
       roas: round(m.roas),
       aov: purchases > 0 && m.revenue > 0 ? round(m.revenue / purchases) : null,
+      ...(m.result_event === 'offsite_conversion.fb_pixel_custom'
+        ? { result_note: 'Counts every custom pixel event, not only the one optimized for. Create a custom conversion for the event to count it exactly.' }
+        : {}),
+      ...(!resultEvent && !fromAdset && fromCampaign === MIXED
+        ? { result_note: 'Ad sets in this campaign optimize for different events; results use the objective default. Use --level adset for exact results.' }
+        : {}),
     };
   });
+}
+
+const MIXED = '__mixed__';
+
+/** Optimization event per ad set, and per campaign when all its ad sets agree. */
+export interface OptimizedEvents { adsets: Map<string, string>; campaigns: Map<string, string> }
+
+/**
+ * Read the ad sets under an account, campaign or ad set and map each to the
+ * event it optimizes for (its promoted_object), so results count that event
+ * rather than the objective's default (e.g. Purchase for every Sales campaign).
+ */
+export async function loadOptimizedEvents(client: MetaClient, objectId: string): Promise<OptimizedEvents> {
+  const adsets = new Map<string, string>();
+  const campaigns = new Map<string, string>();
+  const fields = 'id,campaign_id,promoted_object';
+  let list: Array<Record<string, unknown>> = [];
+  try {
+    if (objectId.startsWith('act_')) {
+      const resp = await client.requestAllPages(`${objectId}/adsets`, { params: { fields, limit: '500' } });
+      list = ((resp.data as { data?: Array<Record<string, unknown>> }).data) || [];
+    } else {
+      const own = (await client.request(objectId, { params: { fields } })).data as Record<string, unknown>;
+      if (own.promoted_object !== undefined || own.campaign_id) list = [own];
+      else {
+        const resp = await client.requestAllPages(`${objectId}/adsets`, { params: { fields, limit: '500' } });
+        list = ((resp.data as { data?: Array<Record<string, unknown>> }).data) || [];
+      }
+    }
+  } catch {
+    return { adsets, campaigns }; // Fall back to objective defaults.
+  }
+  for (const a of list) {
+    const event = resultEventForPromotedObject(a.promoted_object as Record<string, unknown> | undefined);
+    if (!event) continue;
+    adsets.set(String(a.id), event);
+    const camp = String(a.campaign_id ?? '');
+    if (!camp) continue;
+    const prev = campaigns.get(camp);
+    campaigns.set(camp, prev === undefined || prev === event ? event : MIXED);
+  }
+  return { adsets, campaigns };
 }
 
 function round(v: number | null, dp = 4): number | null {
@@ -170,6 +222,8 @@ export function buildInsightParams(objectId: string, opts: InsightQueryOpts): Re
   if (opts.withDerived || opts.comparePrevious) {
     fields = withFields(fields, 'spend', 'impressions', 'reach', 'actions', 'action_values');
     if (level !== 'account') fields = withFields(fields, 'objective', 'optimization_goal');
+    // Needed to look up each row's optimization event (see loadOptimizedEvents).
+    if (level === 'ad' || level === 'adset') fields = withFields(fields, 'adset_id', 'campaign_id');
   }
   const params: Record<string, string> = {
     fields,
@@ -218,7 +272,8 @@ export async function runInsights(
   if (rows.length === 0 || data.dryRun) return response.data;
 
   const derived = opts.withDerived || opts.comparePrevious;
-  if (derived) rows = addDerivedColumns(rows, opts.resultEvent);
+  const optimized = derived && !opts.resultEvent && !client.isDryRun() ? await loadOptimizedEvents(client, objectId) : undefined;
+  if (derived) rows = addDerivedColumns(rows, opts.resultEvent, optimized);
 
   if (opts.comparePrevious) {
     const first = rows[0];
@@ -229,7 +284,7 @@ export async function runInsights(
     delete prevParams.date_preset;
     delete prevParams.after;
     const prevResponse = await fetchRows(prevParams);
-    const prevRows = addDerivedColumns(rowsOf(prevResponse.data), opts.resultEvent);
+    const prevRows = addDerivedColumns(rowsOf(prevResponse.data), opts.resultEvent, optimized);
     const level = params.level || 'account';
     const keyFields = [...(LEVEL_ID_FIELDS[level] ? [LEVEL_ID_FIELDS[level][0]] : []),
       ...(params.breakdowns ? params.breakdowns.split(',') : [])];

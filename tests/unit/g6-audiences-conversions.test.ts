@@ -87,7 +87,7 @@ describe('lookalikes (#20)', () => {
   it('creates one lookalike per tier with starting_ratio', async () => {
     const { client, request } = mockClient(ok);
     await run(registerAudienceCommands, client, [
-      'audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5', '--tiers', '0-1,1-3', '--name', 'LAL',
+      'audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5', '--tiers', '0-1,1-3', '--name', 'LAL', '--countries', 'US',
     ]);
     const specs = request.mock.calls.map(c => JSON.parse(c[1]!.body!.lookalike_spec));
     expect(specs[0]).toMatchObject({ ratio: 0.01 });

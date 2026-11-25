@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { UsageError, handleErrors } from '../errors.js';
 import { parseJsonInput } from '../json-input.js';
 import { normalizePii } from './conversions.js';
 
@@ -294,7 +294,8 @@ export function registerAudienceCommands(program: Command, getClient: () => Meta
     .requiredOption('--account-id <id>', 'Ad account ID (act_XXX)', getDefaultAccountId())
     .requiredOption('--source-audience-id <id>', 'Source audience ID')
     .option('--name <name>', 'Audience name')
-    .option('--countries <countries>', 'Deprecated: Meta ignores lookalike countries; location comes from the ad set targeting')
+    .option('--countries <countries>', 'Comma-separated country codes the lookalike is built from (one country, or several)')
+    .option('--worldwide', 'Build the lookalike from all countries')
     .option('--ratio <ratio>', 'Lookalike ratio (0.01-0.20); top x% of similarity', '0.01')
     .option('--starting-ratio <ratio>', 'Lower bound of the band, e.g. --starting-ratio 0.01 --ratio 0.03 for 1-3%')
     .option('--tiers <bands>', 'Create several non-overlapping bands in percent, e.g. 0-1,1-3,3-5 (overrides --ratio/--starting-ratio)')
@@ -304,16 +305,15 @@ export function registerAudienceCommands(program: Command, getClient: () => Meta
         throw new Error('Account ID required. Use --account-id or set META_ADS_CLI_ACCOUNT_ID');
       }
       const client = getClient();
-      if (opts.countries) {
-        console.error('Warning: --countries is ignored. Meta no longer uses lookalike_spec country/location_spec (v26.0, all versions from 2026-09-01); set locations in the ad set targeting instead.');
-      }
+      // Meta requires a location on every lookalike (#2654); there is no default.
+      const location = lookalikeLocation(opts.countries, Boolean(opts.worldwide));
       const bands = opts.tiers
         ? parseLookalikeTiers(opts.tiers)
         : [{ starting: opts.startingRatio !== undefined ? parseFloat(opts.startingRatio) : undefined, ratio: parseFloat(opts.ratio) }];
 
       const results: unknown[] = [];
       for (const band of bands) {
-        const spec = buildLookalikeSpec(opts.sourceAudienceId, band.ratio, band.starting);
+        const spec = { ...buildLookalikeSpec(opts.sourceAudienceId, band.ratio, band.starting), ...location };
         const label = band.starting ? `${band.starting * 100}-${band.ratio * 100}%` : `${band.ratio * 100}%`;
         const body: Record<string, string> = {
           name: opts.name
@@ -564,6 +564,20 @@ function validateLookalikeBand(ratio: number, starting?: number): void {
   if (starting !== undefined && (!Number.isFinite(starting) || starting < 0 || starting >= ratio)) {
     throw new Error('--starting-ratio must be at least 0 and below --ratio');
   }
+}
+
+/**
+ * The location part of a lookalike spec: one country as `country`, several
+ * or worldwide as `location_spec`. Meta refuses lookalikes without one.
+ */
+export function lookalikeLocation(countries: string | undefined, worldwide: boolean): Record<string, unknown> {
+  if (worldwide && countries) throw new UsageError('Use either --worldwide or --countries, not both');
+  if (worldwide) return { location_spec: { geo_locations: { country_groups: ['worldwide'] } } };
+  const list = String(countries ?? '').split(',').map(c => c.trim().toUpperCase()).filter(Boolean);
+  if (list.length === 0) throw new UsageError('A lookalike needs a location: pass --countries US[,GB,...] or --worldwide');
+  const bad = list.filter(c => !/^[A-Z]{2}$/.test(c));
+  if (bad.length) throw new UsageError(`Invalid country code(s): ${bad.join(', ')}`);
+  return list.length === 1 ? { country: list[0] } : { location_spec: { geo_locations: { countries: list } } };
 }
 
 export function buildLookalikeSpec(sourceAudienceId: string, ratio: number, starting?: number): Record<string, unknown> {

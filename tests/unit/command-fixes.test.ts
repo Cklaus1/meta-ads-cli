@@ -106,15 +106,23 @@ describe('duplicate (BUG-26)', () => {
   });
 });
 
-describe('lookalike countries (Meta API update #9)', () => {
-  it('sends no country or location_spec and warns about --countries', async () => {
-    const client = makeClient();
-    await run(registerAudienceCommands, client, ['audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5', '--countries', 'US,GB']);
-    const spec = JSON.parse(client.request.mock.calls[0][1].body.lookalike_spec);
-    expect(spec.country).toBeUndefined();
-    expect(spec.location_spec).toBeUndefined();
-    expect(spec).toMatchObject({ type: 'similarity', ratio: 0.01 });
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--countries is ignored'));
+describe('lookalike locations', () => {
+  it('sends one country as country and several as location_spec', async () => {
+    const one = makeClient();
+    await run(registerAudienceCommands, one, ['audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5', '--countries', 'us']);
+    expect(JSON.parse(one.request.mock.calls[0][1].body.lookalike_spec)).toMatchObject({ country: 'US', ratio: 0.01 });
+    const many = makeClient();
+    await run(registerAudienceCommands, many, ['audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5', '--countries', 'US,GB']);
+    expect(JSON.parse(many.request.mock.calls[0][1].body.lookalike_spec).location_spec).toEqual({ geo_locations: { countries: ['US', 'GB'] } });
+  });
+
+  it('supports --worldwide and requires a location', async () => {
+    const ww = makeClient();
+    await run(registerAudienceCommands, ww, ['audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5', '--worldwide']);
+    expect(JSON.parse(ww.request.mock.calls[0][1].body.lookalike_spec).location_spec).toEqual({ geo_locations: { country_groups: ['worldwide'] } });
+    const none = makeClient();
+    await expect(run(registerAudienceCommands, none, ['audiences', 'create-lookalike', '--account-id', 'act_1', '--source-audience-id', '5'])).rejects.toThrow();
+    expect(none.request).not.toHaveBeenCalled();
   });
 });
 

@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import crypto from 'crypto';
 import { MetaClient } from '../meta-client.js';
 import { formatOutput, type OutputFormat } from '../formatter.js';
-import { handleErrors } from '../errors.js';
+import { handleErrors, UsageError } from '../errors.js';
 import { parseJsonInput } from '../json-input.js';
 
 function getDefaultAccountId(): string {
@@ -381,6 +381,44 @@ export function registerConversionCommands(program: Command, getClient: () => Me
       };
 
       console.log(formatOutput(result, opts.output as OutputFormat));
+    }));
+
+  conversions
+    .command('stats <pixelId>')
+    .description('Events a pixel received per 7-day window (event counts, not unique people)')
+    .option('--weeks <n>', 'How many 7-day windows back to read (1-26)', '4')
+    .option('--events <list>', 'Only these events (comma-separated)')
+    .option('-o, --output <format>', 'Output format', 'json')
+    .action(handleErrors(async (pixelId: string, opts) => {
+      const weeks = Number(opts.weeks);
+      if (!Number.isInteger(weeks) || weeks < 1 || weeks > 26) throw new UsageError('--weeks must be an integer from 1 to 26');
+      const only = opts.events ? new Set(String(opts.events).split(',').map((e: string) => e.trim()).filter(Boolean)) : undefined;
+      const client = getClient();
+      const now = Math.floor(Date.now() / 1000);
+      const rows: Array<Record<string, unknown>> = [];
+      for (let w = 0; w < weeks; w++) {
+        const end = now - w * 7 * 86400;
+        const start = end - 7 * 86400;
+        const resp = await client.request(`${pixelId}/stats`, {
+          params: { aggregation: 'event', start_time: String(start), end_time: String(end) },
+        });
+        const buckets = (resp.data as { data?: Array<{ start_time?: string; data?: Array<{ value: string; count: number | string }> }> }).data || [];
+        const row: Record<string, unknown> = {
+          since: new Date(start * 1000).toISOString().slice(0, 10),
+          until: new Date(end * 1000).toISOString().slice(0, 10),
+          // Earliest bucket Meta returned: shows when it clips the requested window.
+          first_bucket: buckets.map(b => String(b.start_time ?? '')).filter(Boolean).sort()[0] ?? null,
+          buckets: buckets.length,
+        };
+        for (const b of buckets) {
+          for (const e of b.data || []) {
+            if (only && !only.has(e.value)) continue;
+            row[e.value] = Number(row[e.value] ?? 0) + Number(e.count);
+          }
+        }
+        rows.push(row);
+      }
+      console.log(formatOutput(rows, opts.output as OutputFormat));
     }));
 
   conversions

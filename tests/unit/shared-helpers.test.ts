@@ -69,3 +69,24 @@ describe('formatter action columns', () => {
     expect(out.split('\n')[1]).toBe('1,4,9');
   });
 });
+
+import { resultEventForPromotedObject } from '../../src/metrics.js';
+import { addDerivedColumns } from '../../src/commands/insights.js';
+describe('optimization-event results', () => {
+  it('maps promoted objects to the action type they optimize for', () => {
+    expect(resultEventForPromotedObject({ pixel_id: '1', custom_event_type: 'PURCHASE' })).toBe('purchase');
+    expect(resultEventForPromotedObject({ pixel_id: '1', custom_event_type: 'OTHER', custom_event_str: 'ProjectCreated' })).toBe('offsite_conversion.fb_pixel_custom');
+    expect(resultEventForPromotedObject({ custom_conversion_id: '77' })).toBe('offsite_conversion.custom.77');
+    expect(resultEventForPromotedObject({ page_id: '1' })).toBeUndefined();
+  });
+
+  it('counts each ad set by its own event and flags mixed campaigns', () => {
+    const optimized = { adsets: new Map([['a1', 'offsite_conversion.fb_pixel_custom']]), campaigns: new Map([['c1', 'offsite_conversion.fb_pixel_custom'], ['c2', '__mixed__']]) };
+    const rows = addDerivedColumns([
+      { adset_id: 'a1', objective: 'OUTCOME_SALES', spend: '10', actions: [{ action_type: 'offsite_conversion.fb_pixel_custom', value: '5' }] },
+      { campaign_id: 'c2', objective: 'OUTCOME_SALES', spend: '10', actions: [] },
+    ], undefined, optimized);
+    expect(rows[0]).toMatchObject({ result_event: 'offsite_conversion.fb_pixel_custom', results: 5, cost_per_result: 2 });
+    expect(rows[1].result_note).toContain('different events');
+  });
+});

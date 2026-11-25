@@ -179,12 +179,15 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
     .option('--ad-status <status>', 'Only keep ads with this configured status (ACTIVE, PAUSED)')
     .option('--skip-rejected', 'Leave out ads that are disapproved or flagged in review')
     .option('--ad-ids <ids>', 'Only keep these ads (comma-separated), with their ad sets and creatives')
+    .option('--page-delay <ms>', 'Wait this long between API calls (pages and individual reads), to stay under rate limits', '0')
     .option('--with-media <dir>', 'Also download every image and video the creatives use into this folder, so the snapshot can be restored into another account')
     .option('-o, --output <format>', 'Output format when writing to stdout', 'json')
     .action(handleErrors(async (opts) => {
       if (!opts.accountId) throw new Error('Account ID required (--account-id or META_ADS_CLI_ACCOUNT_ID)');
       const client = getClient();
       const pageLimit = parseInt(opts.pageLimit, 10);
+      const delayMs = Math.max(0, parseInt(opts.pageDelay, 10) || 0);
+      const pause = () => (delayMs ? new Promise(r => setTimeout(r, delayMs)) : Promise.resolve());
 
       const filter: Record<string, string> = {};
       if (opts.status) filter.effective_status = JSON.stringify([opts.status]);
@@ -192,7 +195,8 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
         ? String(opts.campaignIds).split(',').map((x: string) => x.trim()).filter(Boolean)
         : undefined;
       const list = async <T>(endpoint: string, fields: string): Promise<T[]> => {
-        const resp = await client.requestAllPages(endpoint, { params: { fields, limit: '100', ...filter } }, pageLimit);
+        await pause();
+        const resp = await client.requestAllPages(endpoint, { params: { fields, limit: '100', ...filter } }, pageLimit, delayMs);
         return ((resp.data as Record<string, unknown>).data as T[]) || [];
       };
 
@@ -201,6 +205,7 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
       let ads: AdSnap[] = [];
       if (campaignIds) {
         for (const id of campaignIds) {
+          await pause();
           const camp = (await client.request(id, { params: { fields: CAMPAIGN_FIELDS } })).data as CampaignSnap;
           campaigns.push(camp);
           adsets.push(...await list<AdSetSnap>(`${id}/adsets`, ADSET_FIELDS));
@@ -254,6 +259,7 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
       const have = new Set(creatives.map(c => c.id));
       for (const id of referenced) {
         if (have.has(id)) continue;
+        await pause();
         try {
           creatives.push((await client.request(id, { params: { fields: CREATIVE_FIELDS } })).data as CreativeSnap);
         } catch (err) {
@@ -264,7 +270,7 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
       let media: MediaManifest | undefined;
       if (opts.withMedia) {
         if (!opts.file) throw new Error('--with-media needs --file, so media paths can be stored relative to the snapshot');
-        media = await exportMedia(client, opts.accountId, creatives, opts.withMedia, path.dirname(path.resolve(opts.file)));
+        media = await exportMedia(client, opts.accountId, creatives, opts.withMedia, path.dirname(path.resolve(opts.file)), pause);
       }
 
       const snapshot: Snapshot = {
@@ -640,35 +646,48 @@ export function registerBackupCommands(program: Command, getClient: () => MetaCl
 }
 
 /** Download every image and video the creatives use, and record them in a manifest. */
-async function exportMedia(client: MetaClient, accountId: string, creatives: CreativeSnap[], dir: string, snapshotDir: string): Promise<MediaManifest> {
+async function exportMedia(
+  client: MetaClient, accountId: string, creatives: CreativeSnap[], dir: string, snapshotDir: string,
+  pause: () => Promise<unknown> = () => Promise.resolve(),
+): Promise<MediaManifest> {
   const { images, videos } = collectMedia(creatives);
   const absDir = path.resolve(dir);
   mkdirSync(path.join(absDir, 'images'), { recursive: true });
   mkdirSync(path.join(absDir, 'videos'), { recursive: true });
   const manifest: MediaManifest = { dir: path.relative(snapshotDir, absDir) || '.', images: {}, videos: {} };
 
+  // The creative's own image_url (a CDN link) is a fallback for hashes the
+  // account's image library no longer has (deleted, or added via a Page post).
+  const creativeUrl = new Map<string, string>();
+  for (const c of creatives) {
+    const hash = (c.object_story_spec as { link_data?: { image_hash?: string } } | undefined)?.link_data?.image_hash || c.image_hash;
+    if (typeof hash === 'string' && typeof c.image_url === 'string') creativeUrl.set(hash, c.image_url);
+  }
   const hashes = [...images];
   for (let i = 0; i < hashes.length; i += 50) {
     const batch = hashes.slice(i, i + 50);
+    await pause();
     const resp = await client.request(`${accountId}/adimages`, {
       params: { hashes: JSON.stringify(batch), fields: 'hash,name,url,width,height' },
     });
     const found = ((resp.data as { data?: Array<{ hash: string; name?: string; url?: string }> }).data) || [];
     for (const hash of batch) {
       const img = found.find(f => f.hash === hash);
-      if (!img?.url) { manifest.images[hash] = { error: 'not found in the ad account image library' }; continue; }
-      const file = path.join('images', `${hash}${extFromUrl(img.url, '.jpg')}`);
+      const url = img?.url || creativeUrl.get(hash);
+      if (!url) { manifest.images[hash] = { error: 'not found in the ad account image library' }; continue; }
+      const file = path.join('images', `${hash}${extFromUrl(url, '.jpg')}`);
       try {
-        if (!client.isDryRun()) await download(img.url, path.join(absDir, file));
-        manifest.images[hash] = { file, name: img.name, url: img.url };
+        if (!client.isDryRun()) await download(url, path.join(absDir, file));
+        manifest.images[hash] = { file, name: img?.name, url, ...(img?.url ? {} : { source: 'creative image_url' }) };
       } catch (err) {
-        manifest.images[hash] = { name: img.name, url: img.url, error: (err as Error).message };
+        manifest.images[hash] = { name: img?.name, url, error: (err as Error).message };
       }
     }
   }
 
   for (const id of videos) {
     try {
+      await pause();
       const v = (await client.request(id, { params: { fields: 'source,title' } })).data as { source?: string; title?: string };
       if (!v.source) { manifest.videos[id] = { title: v.title, error: 'no downloadable source' }; continue; }
       const file = path.join('videos', `${id}${extFromUrl(v.source, '.mp4')}`);
